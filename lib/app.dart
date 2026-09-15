@@ -15,9 +15,6 @@ import 'presentation/screens/home/main_shell.dart';
 class SecureMessengerApp extends ConsumerStatefulWidget {
   const SecureMessengerApp({super.key});
 
-  /// Lets notification taps deep-link into a chat from anywhere.
-  static final navigatorKey = GlobalKey<NavigatorState>();
-
   @override
   ConsumerState<SecureMessengerApp> createState() => _SecureMessengerAppState();
 }
@@ -26,6 +23,14 @@ class _SecureMessengerAppState extends ConsumerState<SecureMessengerApp> {
   bool _launchHandled = false;
   bool _bgStarted = false;
 
+  /// The navigator key is minted fresh on EVERY identity change. A static
+  /// global key would reparent the old Navigator (with its Login/Code route
+  /// stack) into the rebuilt tree and silently ignore the new `home:` —
+  /// leaving the user stuck on the code screen after a successful login.
+  bool _navKeyInit = false;
+  String? _navUserId;
+  GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
   @override
   void initState() {
     super.initState();
@@ -33,7 +38,7 @@ class _SecureMessengerAppState extends ConsumerState<SecureMessengerApp> {
   }
 
   void _openChat(String chatId, String title, String chatType) {
-    final nav = SecureMessengerApp.navigatorKey.currentState;
+    final nav = _navigatorKey.currentState;
     if (nav == null) return;
     nav.push(
       MaterialPageRoute<void>(
@@ -53,21 +58,35 @@ class _SecureMessengerAppState extends ConsumerState<SecureMessengerApp> {
     final authState = ref.watch(authNotifierProvider);
     final userId = authState.valueOrNull?.id;
 
+    // New identity => new Navigator, so `home:` below takes effect and no
+    // route from the previous session (login/code/register/2FA screens)
+    // can survive. Same-user refreshes keep the existing Navigator.
+    if (!_navKeyInit || _navUserId != userId) {
+      _navKeyInit = true;
+      _navUserId = userId;
+      _navigatorKey = GlobalKey<NavigatorState>();
+    }
+
     // Notification taps only make sense while signed in.
     NotificationService.appReady = userId != null;
     if (userId != null && !_bgStarted) {
       _bgStarted = true;
-      // Ask once per login: Android 13+ / iOS both need explicit consent.
-      NotificationService().requestPermissions();
-      BackgroundPollService.start();
-      if (!_launchHandled) {
-        _launchHandled = true;
-        // A tap that launched the app from killed state: open that chat.
-        Future.delayed(
-          const Duration(milliseconds: 800),
-          () => NotificationService().handleLaunchDetails(),
-        );
-      }
+      // Side effects run post-frame, never mid-build: the permission dialog
+      // and worker registration must not race the login route transition.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        // Ask once per login: Android 13+ / iOS both need explicit consent.
+        NotificationService().requestPermissions();
+        BackgroundPollService.start();
+        if (!_launchHandled) {
+          _launchHandled = true;
+          // A tap that launched the app from killed state: open that chat.
+          Future.delayed(
+            const Duration(milliseconds: 800),
+            () => NotificationService().handleLaunchDetails(),
+          );
+        }
+      });
     } else if (userId == null) {
       _bgStarted = false;
     }
@@ -76,8 +95,10 @@ class _SecureMessengerAppState extends ConsumerState<SecureMessengerApp> {
       // An identity change discards every route from the previous session,
       // including nested login/register/2FA and account-management routes.
       // Theme, locale and profile refreshes for the SAME user retain routes.
+      // (Works together with the per-identity _navigatorKey above: a static
+      // navigator key would reparent the old route stack and break this.)
       key: ValueKey(userId ?? 'signed-out'),
-      navigatorKey: SecureMessengerApp.navigatorKey,
+      navigatorKey: _navigatorKey,
       title: 'SecureMessenger',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
