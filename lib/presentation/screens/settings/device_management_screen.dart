@@ -42,8 +42,11 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     if (confirm != true) return;
     try {
       await _api.post('/devices/$deviceId/terminate', {});
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('نشست پایان یافت')));
-      await _load();
+      if (!mounted) return;
+      // Drop the row immediately: the server has already revoked its tokens
+      // and sessions, so the device is disconnected for real (Item 4).
+      setState(() => _devices.removeWhere((d) => d['id'] == deviceId));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('نشست پایان یافت و دستگاه خارج شد')));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
     }
@@ -53,9 +56,13 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     final confirm = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(title: const Text('پایان همه نشست‌های دیگر'), content: const Text('همه دستگاه‌ها به‌جز دستگاه فعلی خارج شوند؟ (مانند تلگرام)'), actions: [TextButton(onPressed: ()=>Navigator.pop(ctx,false), child: const Text('لغو')), TextButton(onPressed: ()=>Navigator.pop(ctx,true), child: const Text('پایان همه', style: TextStyle(color: Colors.red))) ]));
     if (confirm != true) return;
     try {
-      await _api.post('/devices/terminate-others', {});
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('نشست‌های دیگر پایان یافت')));
-      await _load();
+      final res = await _api.post('/devices/terminate-others', {});
+      if (!mounted) return;
+      final count = res['terminated'] as int? ?? 0;
+      setState(() => _devices.removeWhere((d) => d['is_current'] != true));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(count > 0 ? '$count نشست دیگر پایان یافت' : 'نشست دیگری وجود ندارد')),
+      );
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
     }

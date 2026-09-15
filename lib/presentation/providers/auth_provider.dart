@@ -3,11 +3,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/models/user_model.dart';
 import '../../data/services/account_service.dart';
 import '../../data/services/api_service.dart';
+import '../../data/services/background_poll_service.dart';
+import '../../data/services/notification_service.dart';
 import '../../data/services/storage_service.dart';
 
 final authNotifierProvider =
     StateNotifierProvider<AuthNotifier, AsyncValue<UserModel?>>((ref) {
-      return AuthNotifier()..checkSession();
+      final notifier = AuthNotifier();
+      // A device terminated from another phone signs THIS phone out on its
+      // very next API call (Item 4), exactly like Telegram.
+      ApiService.onUnauthorized = (_) => notifier.handleRemoteTermination();
+      ref.onDispose(() {
+        if (ApiService.onUnauthorized != null) ApiService.onUnauthorized = null;
+      });
+      notifier.checkSession();
+      return notifier;
     });
 
 /// Published only after credentials and auth state agree. A token refresh for
@@ -169,6 +179,13 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserModel?>> {
     await AccountService.clearActive();
     if (!_isCurrent(generation)) return;
     ApiService().setToken(null);
+    // Signed out: no banners, no background polling for this account.
+    try {
+      await NotificationService().cancelAll();
+    } catch (_) {}
+    try {
+      await BackgroundPollService.stop();
+    } catch (_) {}
     state = const AsyncValue.data(null);
   }
 
@@ -191,4 +208,18 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserModel?>> {
   /// Sign out of the active account but keep it in the saved-accounts list, so
   /// it can be resumed from the login screen without retyping credentials.
   Future<void> logoutKeepAccounts() => _logout(keepAccounts: true);
+
+  /// Called when the server reports `device_terminated` / `session_ended`:
+  /// drop the dead credentials locally (the remote device already ended the
+  /// server-side session, so no logout call is needed).
+  Future<void> handleRemoteTermination() async {
+    final generation = ++_sessionGeneration;
+    final userId = state.valueOrNull?.id ?? StorageService.getUserId();
+    if (userId != null) {
+      try {
+        await AccountService.remove(userId);
+      } catch (_) {}
+    }
+    await _clearSession(generation);
+  }
 }

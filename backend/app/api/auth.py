@@ -201,6 +201,26 @@ def _register_or_update_device(user: User, device_info: dict) -> tuple[UserDevic
         is_deleted=False,
     ).first()
     is_new_device = False
+    if device is None:
+        # A terminated (soft-deleted) device that signs in again must revive
+        # its own row: the (user_id, fingerprint) unique key forbids a
+        # second row, and reviving keeps the audit trail intact.
+        deleted = UserDevice.query.filter_by(
+            user_id=user.id,
+            device_fingerprint=fingerprint,
+            is_deleted=True,
+        ).first()
+        if deleted is not None:
+            deleted.is_deleted = False
+            deleted.deleted_at = None
+            deleted.is_active = True
+            deleted.last_active = datetime.utcnow()
+            deleted.device_name = device_info.get('device_name') or deleted.device_name
+            deleted.device_model = device_info.get('model') or deleted.device_model
+            deleted.os_version = device_info.get('os') or deleted.os_version
+            deleted.app_version = device_info.get('app_version') or deleted.app_version
+            deleted.user_agent = request.headers.get('User-Agent')
+            return deleted, True
     if not device:
         # Preserve the product's original rule: no more than three accounts
         # may use a single stable device fingerprint.
@@ -279,9 +299,19 @@ def _create_authenticated_session(
     device, is_new_device = _register_or_update_device(user, device_info)
     user.is_online = True
     user.last_seen = datetime.utcnow()
-
-    access = create_access_token(identity=user.id, expires_delta=timedelta(hours=24))
-    refresh = create_refresh_token(identity=user.id, expires_delta=timedelta(days=30))
+    # The device id travels inside the JWT so that terminating the device
+    # revokes its tokens immediately via the blocklist loader (Item 4).
+    # Flush first: a brand-new device has no id until it is persisted.
+    db.session.flush()
+    claims = {'device_id': device.id}
+    access = create_access_token(
+        identity=user.id, expires_delta=timedelta(hours=24),
+        additional_claims=claims,
+    )
+    refresh = create_refresh_token(
+        identity=user.id, expires_delta=timedelta(days=30),
+        additional_claims=claims,
+    )
     db.session.add(UserSession(
         user_id=user.id,
         device_id=device.id,
@@ -734,18 +764,64 @@ def disable_two_factor():
 @auth_bp.route('/logout', methods=['POST'])
 @jwt_required()
 def logout():
+    from flask_jwt_extended import get_jwt
     user_id = get_jwt_identity()
+    claims = get_jwt()
+    device_id = claims.get('device_id')
+    if device_id:
+        # Logging out ends this device's sessions (Telegram-like). The
+        # device row stays so the 3-account limit remains enforceable.
+        UserSession.query.filter_by(
+            device_id=device_id, user_id=user_id, is_active=True,
+        ).update({'is_active': False}, synchronize_session=False)
+        device = UserDevice.query.filter_by(
+            id=device_id, user_id=user_id,
+        ).first()
+        if device:
+            device.last_active = datetime.utcnow()
     user = db.session.get(User, user_id)
     if user:
         user.is_online = False
         user.last_seen = datetime.utcnow()
-        db.session.commit()
+    db.session.add(AuditLog(
+        actor_id=user_id, action='user_logout', entity_type='user',
+        entity_id=user_id, ip_address=get_client_ip(),
+    ))
+    db.session.commit()
     return jsonify({'message': 'خروج موفق'}), 200
 
 
 @auth_bp.route('/refresh', methods=['POST'])
 @jwt_required(refresh=True)
 def refresh():
+    from flask_jwt_extended import get_jwt
     user_id = get_jwt_identity()
+    claims = get_jwt()
+    device_id = claims.get('device_id')
+    if device_id:
+        device = UserDevice.query.filter_by(
+            id=device_id, user_id=user_id,
+        ).first()
+        if device is not None and (device.is_deleted or not device.is_active):
+            return jsonify({
+                'error': 'این دستگاه از حساب خارج شده است.',
+                'code': 'device_terminated',
+            }), 401
+        session = UserSession.query.filter_by(
+            device_id=device_id, user_id=user_id, is_active=True,
+        ).first()
+        if session is None:
+            return jsonify({
+                'error': 'نشست منقضی شده است. لطفاً دوباره وارد شوید.',
+                'code': 'session_ended',
+            }), 401
+        session.last_used = datetime.utcnow()
+        device.last_active = datetime.utcnow()
+        db.session.commit()
+        access = create_access_token(
+            identity=user_id, expires_delta=timedelta(hours=24),
+            additional_claims={'device_id': device_id},
+        )
+        return jsonify({'access_token': access}), 200
     access = create_access_token(identity=user_id, expires_delta=timedelta(hours=24))
     return jsonify({'access_token': access}), 200

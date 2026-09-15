@@ -187,9 +187,13 @@ class MessageBubble extends StatelessWidget {
             else if (message.isViewOnce)
               _ViewOnceTile(
                 viewed: message.viewedAt != null,
+                expired: message.isTimedExpired,
+                viewDuration: message.viewDuration,
                 isMine: isMine,
                 color: fg,
-                onTap: !isMine && message.viewedAt == null
+                onTap: !isMine &&
+                        message.viewedAt == null &&
+                        !message.isTimedExpired
                     ? onOpenViewOnce
                     : null,
               )
@@ -453,12 +457,16 @@ class MessageBubble extends StatelessWidget {
 
 class _ViewOnceTile extends StatelessWidget {
   final bool viewed;
+  final bool expired;
+  final int? viewDuration;
   final bool isMine;
   final Color color;
   final VoidCallback? onTap;
 
   const _ViewOnceTile({
     required this.viewed,
+    this.expired = false,
+    this.viewDuration,
     required this.isMine,
     required this.color,
     this.onTap,
@@ -467,6 +475,13 @@ class _ViewOnceTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final labels = MediaLabels.of(context);
+    final timed = (viewDuration ?? 0) > 0;
+    final title = timed
+        ? 'عکس زمان‌دار ($viewDuration ثانیه)'
+        : (viewed ? labels.viewed : labels.viewOnce);
+    final subtitle = expired
+        ? 'این عکس منقضی شده است'
+        : (isMine ? labels.sentOnce : labels.tapToOpen);
     return Semantics(
       button: onTap != null,
       child: InkWell(
@@ -478,7 +493,11 @@ class _ViewOnceTile extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
-                viewed ? Icons.timer_off_outlined : Icons.timer_outlined,
+                viewed || expired
+                    ? Icons.timer_off_outlined
+                    : timed
+                        ? Icons.timer_10_outlined
+                        : Icons.timer_outlined,
                 color: color,
                 size: 30,
               ),
@@ -489,7 +508,7 @@ class _ViewOnceTile extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      viewed ? labels.viewed : labels.viewOnce,
+                      title,
                       style: TextStyle(
                         color: color,
                         fontWeight: FontWeight.w600,
@@ -499,7 +518,7 @@ class _ViewOnceTile extends StatelessWidget {
                     if (!viewed) ...[
                       const SizedBox(height: 3),
                       Text(
-                        isMine ? labels.sentOnce : labels.tapToOpen,
+                        subtitle,
                         style: TextStyle(
                           color: color.withValues(alpha: 0.75),
                           fontSize: 12,

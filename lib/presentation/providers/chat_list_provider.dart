@@ -7,6 +7,7 @@ import '../../data/models/chat_folder_model.dart';
 import '../../data/models/chat_model.dart';
 import '../../data/services/api_service.dart';
 import '../../data/services/archive_lock_service.dart';
+import '../../data/services/notification_service.dart';
 import 'auth_provider.dart';
 
 /// The main (non archived) chat list plus the archive summary shown on top of
@@ -58,6 +59,7 @@ final chatListProvider =
         return ChatListNotifier(
           api: session.api,
           enabled: session.userId != null,
+          userId: session.userId,
         );
       },
     );
@@ -94,10 +96,12 @@ class ChatListNotifier extends StateNotifier<AsyncValue<ChatListState>> {
     bool enabled = true,
     bool archived = false,
     ArchiveLockService? lock,
+    String? userId,
   }) : _api = api ?? ApiService(),
        _enabled = enabled,
        _archived = archived,
        _lock = lock,
+       _userId = userId,
        super(
          enabled
              ? const AsyncValue.loading()
@@ -116,6 +120,7 @@ class ChatListNotifier extends StateNotifier<AsyncValue<ChatListState>> {
   final bool _enabled;
   final bool _archived;
   final ArchiveLockService? _lock;
+  final String? _userId;
   Timer? _pollTimer;
   Future<void>? _loading;
 
@@ -134,7 +139,20 @@ class ChatListNotifier extends StateNotifier<AsyncValue<ChatListState>> {
         headers: _archived ? _lock?.headers : null,
       );
       if (!mounted) return;
-      state = AsyncValue.data(ChatListState.fromJson(res));
+      final previous = state.valueOrNull;
+      final next = ChatListState.fromJson(res);
+      state = AsyncValue.data(next);
+      // Instant in-app/background notifications (Item 3): the same 3s poll
+      // Telegram-style diffs unread counts — no push server needed.
+      if (!_archived) {
+        unawaited(
+          NotificationService().notifyForChatList(
+            previous: previous?.chats,
+            current: next.chats,
+            currentUserId: _userId,
+          ),
+        );
+      }
     } catch (error, stack) {
       if (!mounted) return;
       // A locked archive is a real error for the archive screen, but the main

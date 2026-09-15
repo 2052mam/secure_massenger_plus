@@ -20,6 +20,7 @@ import '../../../data/models/reply_preview_model.dart';
 import '../../../data/services/media_playback_coordinator.dart';
 import '../../../core/utils/media_utils.dart';
 import '../../../data/services/api_service.dart';
+import '../../../data/services/notification_service.dart';
 import '../../../data/services/storage_service.dart';
 import '../../../data/services/voice_service.dart';
 import '../../../data/services/location_service.dart';
@@ -183,6 +184,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     _currentUserId =
         ref.read(authNotifierProvider).valueOrNull?.id ??
         StorageService.getUserId();
+    // The open chat never raises a banner for itself, and opening it clears
+    // any banner it raised earlier (Telegram behaviour).
+    NotificationService().suppressedChats.add(widget.chatId);
+    unawaited(NotificationService().cancelForChat(widget.chatId));
     _loadMessages();
     _startPolling();
     _loadBackground();
@@ -279,6 +284,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   @override
   void dispose() {
     ++_loadGeneration;
+    NotificationService().suppressedChats.remove(widget.chatId);
     WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
     _highlightTimer?.cancel();
@@ -379,6 +385,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             message.status,
           ),
           viewedAt: previous.viewedAt ?? message.viewedAt,
+          viewExpiresAt: previous.viewExpiresAt ?? message.viewExpiresAt,
         );
       }
     }
@@ -983,6 +990,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
 
     bool sendViewOnce = viewOnce;
+    int? sendViewDuration;
     bool sendSpoiler = _isSpoiler;
     if (!isVideo) {
       final choice = await showModalBottomSheet<String>(
@@ -1009,6 +1017,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                   subtitle: Text(MediaLabels.of(ctx).disappears),
                   onTap: () => Navigator.pop(ctx, 'once'),
                 ),
+              if (_can('send_view_once_photos'))
+                ListTile(
+                  leading: const Icon(
+                    Icons.timer_10_outlined,
+                    color: Colors.deepOrange,
+                  ),
+                  title: const Text('ارسال عکس زمان‌دار (۱۰ ثانیه)'),
+                  subtitle: const Text(
+                    'مثل «یک‌بارمشاهده»، ولی ۱۰ ثانیه بعد از باز شدن بسته می‌شود',
+                  ),
+                  onTap: () => Navigator.pop(ctx, 'timed'),
+                ),
               ListTile(
                 leading: const Icon(Icons.close),
                 title: const Text('لغو'),
@@ -1022,6 +1042,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       if (choice == null || choice == 'cancel' || !mounted) return;
       if (choice == 'spoiler') sendSpoiler = true;
       if (choice == 'once') sendViewOnce = true;
+      if (choice == 'timed') {
+        sendViewOnce = true;
+        sendViewDuration = 10;
+      }
     } else {
       if (!sendSpoiler) {
         final choice = await showModalBottomSheet<String>(
@@ -1070,6 +1094,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         'content': '',
         'is_view_once': sendViewOnce,
         'is_spoiler': sendSpoiler,
+        if (sendViewDuration != null && !isVideo)
+          'view_duration': sendViewDuration,
         if (isVideo && videoMuted) 'is_muted': true,
       };
       if (reply != null) body['reply_to_id'] = reply.id;
@@ -1082,6 +1108,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         'message_type': mediaType,
         'is_view_once': sendViewOnce,
         'is_spoiler': sendSpoiler,
+        if (sendViewDuration != null && !isVideo)
+          'view_duration': sendViewDuration,
         if (isVideo && videoMuted) 'is_muted': true,
       }, reply);
       setState(() {
@@ -1597,27 +1625,43 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         message.senderId == _currentUserId ||
         _reconciler.isUnavailable(message.id))
       return;
+    // Timed photos already past their server deadline open to nothing.
+    if (message.isTimedExpired) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('این عکس زمان‌دار منقضی شده است')),
+      );
+      if (mounted) _refreshMessageStatuses();
+      return;
+    }
     _openingMedia = true;
     try {
       await _playback.pause();
       if (!mounted) return;
       final route = MaterialPageRoute<void>(
         builder: (_) => ViewOncePhotoScreen(
+          viewDuration: message.viewDuration,
+          viewExpiresAt: message.viewExpiresAt,
           loadPhoto: () =>
               _api.getBytes('/messages/${message.id}/view-once/media'),
           consumePhoto: () async {
             final result = await _api
                 .post('/messages/${message.id}/view-once', {})
                 .timeout(const Duration(seconds: 20));
-            return parseApiDateTime(result['viewed_at'] as String)!;
+            return ViewOnceClaim(
+              viewedAt: parseApiDateTime(result['viewed_at'] as String)!,
+              viewExpiresAt: parseApiDateTime(
+                result['view_expires_at'] as String?,
+              ),
+            );
           },
-          onViewed: (viewedAt) {
+          onViewed: (claim) {
             if (!mounted) return;
             setState(() {
               final index = _messages.indexWhere((m) => m.id == message.id);
               if (index != -1)
                 _messages[index] = _messages[index].copyWith(
-                  viewedAt: viewedAt,
+                  viewedAt: claim.viewedAt,
+                  viewExpiresAt: claim.viewExpiresAt,
                 );
             });
           },

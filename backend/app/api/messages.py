@@ -27,33 +27,125 @@ MAX_PINNED_MESSAGES = 100
 
 
 def dispatch_scheduled_messages(chat_id=None):
-    """Automatically dispatch due scheduled messages."""
+    """Automatically dispatch due scheduled messages (idempotent).
+
+    Two requests may poll the same chat at the same moment, and an older
+    ``mark_chat_read`` may already have created ``MessageStatus`` rows for a
+    still-scheduled message. Both cases used to raise an ``IntegrityError``
+    (duplicate ``uq_message_status``) which — on the cPanel host — surfaced
+    as an HTML 500 page. The Flutter client then showed a red ``doctype``
+    error and the chat never loaded again until the history was cleared.
+
+    The dispatch now *claims* each message with a conditional UPDATE (only
+    one worker wins) and inserts only missing status rows, so it never
+    throws a duplicate-key error.
+    """
+    from sqlalchemy.exc import IntegrityError
+
     now = datetime.utcnow()
     query = Message.query.filter(
-        Message.is_scheduled == True,
+        Message.is_scheduled == True,  # noqa: E712
         Message.scheduled_at <= now,
-        Message.is_deleted == False,
-        Message.is_deleted_for_all == False,
+        Message.is_deleted == False,  # noqa: E712
+        Message.is_deleted_for_all == False,  # noqa: E712
     )
     if chat_id:
         query = query.filter(Message.chat_id == chat_id)
-    scheduled_msgs = query.all()
+    # Bound a single poll so one chat with hundreds of due messages cannot
+    # time out the request; the next poll continues where this one stopped.
+    scheduled_msgs = query.order_by(
+        Message.scheduled_at.asc(), Message.id.asc(),
+    ).limit(100).all()
     if not scheduled_msgs:
         return
     for msg in scheduled_msgs:
+        # Claim the message first: a concurrent poll gets 0 rows and skips it.
+        claimed = Message.query.filter_by(
+            id=msg.id, is_scheduled=True, is_deleted=False,
+        ).update({
+            'is_scheduled': False,
+            'scheduled_at': None,
+            'created_at': now,
+        }, synchronize_session=False)
+        if claimed != 1:
+            continue
+        # The UPDATE above bypasses the ORM instance; keep it in sync.
         msg.is_scheduled = False
+        msg.scheduled_at = None
         msg.created_at = now
-        members = ChatMember.query.filter_by(chat_id=msg.chat_id, is_deleted=False).all()
+        try:
+            existing = {
+                row.user_id for row in MessageStatus.query.filter_by(
+                    message_id=msg.id,
+                ).with_entities(MessageStatus.user_id).all()
+            }
+        except Exception:
+            existing = set()
+        if msg.sender_id not in existing:
+            db.session.add(MessageStatus(
+                message_id=msg.id, user_id=msg.sender_id, status='sent',
+            ))
+            existing.add(msg.sender_id)
+        members = ChatMember.query.filter_by(
+            chat_id=msg.chat_id, is_deleted=False,
+        ).all()
         for m in members:
-            if m.user_id != msg.sender_id:
+            if m.user_id != msg.sender_id and m.user_id not in existing:
                 db.session.add(MessageStatus(
                     message_id=msg.id, user_id=m.user_id, status='delivered',
-                    delivered_at=now
+                    delivered_at=now,
                 ))
+                existing.add(m.user_id)
         chat = db.session.get(Chat, msg.chat_id)
         if chat:
             chat.updated_at = now
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A parallel request won the same status row between our check and
+        # the flush. Roll back and let the next poll finish the dispatch;
+        # claimed messages stay claimed only when their commit succeeded.
+        db.session.rollback()
+        # Fall back to one-by-one commits so a single duplicate can never
+        # poison the whole batch again.
+        for msg in scheduled_msgs:
+            try:
+                pending = Message.query.filter_by(
+                    id=msg.id, is_deleted=False,
+                ).first()
+                if pending is None or pending.is_deleted_for_all:
+                    continue
+                if pending.is_scheduled and pending.scheduled_at and pending.scheduled_at <= datetime.utcnow():
+                    pending.is_scheduled = False
+                    pending.scheduled_at = None
+                    pending.created_at = datetime.utcnow()
+                existing = {
+                    row.user_id for row in MessageStatus.query.filter_by(
+                        message_id=pending.id,
+                    ).with_entities(MessageStatus.user_id).all()
+                }
+                if pending.sender_id not in existing:
+                    db.session.add(MessageStatus(
+                        message_id=pending.id, user_id=pending.sender_id,
+                        status='sent',
+                    ))
+                members = ChatMember.query.filter_by(
+                    chat_id=pending.chat_id, is_deleted=False,
+                ).all()
+                for m in members:
+                    if m.user_id != pending.sender_id and m.user_id not in existing:
+                        db.session.add(MessageStatus(
+                            message_id=pending.id, user_id=m.user_id,
+                            status='delivered',
+                            delivered_at=datetime.utcnow(),
+                        ))
+                chat = db.session.get(Chat, pending.chat_id)
+                if chat:
+                    chat.updated_at = datetime.utcnow()
+                db.session.commit()
+            except IntegrityError:
+                db.session.rollback()
+                continue
 
 
 def _pinned_count(chat_id):
@@ -139,6 +231,20 @@ def send_message():
     media_id = data.get('media_id')
     reply_to_id = data.get('reply_to_id')
     is_view_once = bool(data.get('is_view_once', False))
+    # Timed photo (Item 2): same rules as view-once, but the viewer
+    # auto-closes after this many seconds (Telegram-like self-destruct).
+    # Accepts `view_duration`, `timed_seconds` and `view_once_duration`.
+    view_duration = data.get('view_duration', data.get(
+        'timed_seconds', data.get('view_once_duration')))
+    if view_duration is not None:
+        try:
+            view_duration = int(view_duration)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'مدت مشاهده نامعتبر است'}), 400
+        if view_duration < 1 or view_duration > 120:
+            return jsonify({'error': 'مدت مشاهده باید بین ۱ تا ۱۲۰ ثانیه باشد'}), 400
+        if not is_view_once:
+            return jsonify({'error': 'مدت مشاهده فقط برای عکس زمان‌دار مجاز است'}), 400
     is_spoiler = bool(data.get('is_spoiler', False))
     # Encrypted (password-protected) messages: content is ciphertext.
     is_encrypted = bool(data.get('is_encrypted', False))
@@ -262,6 +368,8 @@ def send_message():
 
     if is_view_once and (message_type != 'image' or not media_id):
         return jsonify({'error': 'مشاهده یک‌باره فقط برای عکس مجاز است'}), 400
+    if view_duration is not None and data.get('scheduled_at'):
+        return jsonify({'error': 'عکس زمان‌دار نمی‌تواند زمان‌بندی شود'}), 400
     # Location payload
     latitude = longitude = None
     location_title = None
@@ -334,6 +442,8 @@ def send_message():
             return jsonify({'error': 'این فایل قبلاً در پیام استفاده شده است'}), 400
 
     is_scheduled = bool(scheduled_dt and scheduled_dt > datetime.utcnow() and not is_secure)
+    if is_scheduled and is_view_once:
+        return jsonify({'error': 'پیام یک‌بارمصرف نمی‌تواند زمان‌بندی شود'}), 400
     msg = Message(
         chat_id=chat_id,
         sender_id=user_id,
@@ -342,6 +452,7 @@ def send_message():
         media_id=media_id,
         reply_to_id=reply_to_id,
         is_view_once=is_view_once,
+        view_duration=view_duration,
         is_spoiler=is_spoiler,
         is_scheduled=is_scheduled,
         scheduled_at=scheduled_dt if is_scheduled else None,
@@ -638,7 +749,10 @@ def poll_updates():
     user_id = get_jwt_identity()
     dispatch_scheduled_messages()
     since = request.args.get('since')  # ISO datetime
-    limit = min(int(request.args.get('limit', 50)), 100)
+    try:
+        limit = max(1, min(int(request.args.get('limit', 50)), 100))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'limit نامعتبر است'}), 400
 
     # چت‌هایی که کاربر عضو است
     chat_ids = [m.chat_id for m in ChatMember.query.join(Chat).filter(
@@ -745,8 +859,12 @@ def mark_chat_read(chat_id):
     if not user_in_chat(user_id, chat_id):
         return jsonify({'error': 'دسترسی ندارید'}), 403
 
-    # همه وضعیت‌های این کاربر در این چت را read کن
-    msg_ids = [m.id for m in Message.query.filter_by(chat_id=chat_id, is_deleted=False).all()]
+    # Scheduled messages are invisible until dispatched. Creating read
+    # receipts for them early used to collide with the dispatch insert
+    # (duplicate uq_message_status) and break the whole chat with a 500.
+    msg_ids = [m.id for m in Message.query.filter_by(
+        chat_id=chat_id, is_deleted=False, is_scheduled=False,
+    ).all()]
     # if msg_ids:
     #     MessageStatus.query.filter(
     #         MessageStatus.message_id.in_(msg_ids),
@@ -783,7 +901,9 @@ def mark_chat_read(chat_id):
                 ))
             
         # last_read را به آخرین پیام ببر
-        last = Message.query.filter_by(chat_id=chat_id, is_deleted=False).order_by(Message.created_at.desc()).first()
+        last = Message.query.filter_by(
+            chat_id=chat_id, is_deleted=False, is_scheduled=False,
+        ).order_by(Message.created_at.desc()).first()
         member = ChatMember.query.filter_by(chat_id=chat_id, user_id=user_id, is_deleted=False).first()
         if member and last:
             member.last_read_message_id = last.id
@@ -800,6 +920,13 @@ def view_once_message(message_id, user_id):
     if not msg.is_view_once or msg.message_type != 'image':
         return None, (jsonify({'error': 'این پیام عکس یک‌بارمصرف نیست'}), 400)
     if msg.viewed_at is not None:
+        expires_at = getattr(msg, 'view_expires_at', None)
+        if getattr(msg, 'view_duration', None) and expires_at:
+            remaining = (expires_at - datetime.utcnow()).total_seconds()
+            # The countdown runs on the opener's phone; a second device (or
+            # a re-open after expiry) must not get the bytes again.
+            if remaining <= 0:
+                return None, (jsonify({'error': 'زمان مشاهده عکس به پایان رسیده است'}), 410)
         return None, (jsonify({'error': 'عکس قبلاً مشاهده شده است'}), 410)
     return msg, None
 
@@ -831,17 +958,23 @@ def get_view_once_media(message_id):
 @messages_bp.route('/<message_id>/view-once', methods=['POST'])
 @jwt_required()
 def mark_view_once(message_id):
+    from datetime import timedelta as _td
     user_id = get_jwt_identity()
     msg, error = view_once_message(message_id, user_id)
     if error is not None:
         return error
     viewed_at = datetime.utcnow()
+    duration = getattr(msg, 'view_duration', None)
+    expires_at = viewed_at + _td(seconds=duration) if duration else None
     # A conditional UPDATE works on both MySQL and SQLite. Two devices cannot
     # both win the claim, even when their preceding downloads overlap.
+    payload = {'viewed_at': viewed_at}
+    if expires_at is not None:
+        payload['view_expires_at'] = expires_at
     updated = Message.query.filter_by(
         id=message_id, is_deleted=False, is_deleted_for_all=False,
         is_view_once=True, viewed_at=None,
-    ).update({'viewed_at': viewed_at}, synchronize_session=False)
+    ).update(payload, synchronize_session=False)
     if updated != 1:
         db.session.rollback()
         return jsonify({'error': 'عکس قبلاً مشاهده شده است'}), 410
@@ -850,7 +983,11 @@ def mark_view_once(message_id):
         entity_id=message_id, ip_address=get_client_ip(),
     ))
     db.session.commit()
-    return jsonify({'ok': True, 'viewed_at': utc_iso(viewed_at)}), 200
+    body = {'ok': True, 'viewed_at': utc_iso(viewed_at)}
+    if duration:
+        body['view_duration'] = duration
+        body['view_expires_at'] = utc_iso(expires_at)
+    return jsonify(body), 200
 
 
 @messages_bp.route('/statuses', methods=['POST'])
@@ -930,6 +1067,11 @@ def get_message_statuses():
                 'longitude': getattr(msg, 'longitude', None),
                 'live_until': utc_iso(getattr(msg, 'live_until', None)) if getattr(msg, 'live_until', None) else None,
             })
+    view_expires_at = {
+        msg.id: utc_iso(msg.view_expires_at)
+        for msg in visible
+        if msg.is_view_once and getattr(msg, 'view_expires_at', None)
+    }
     payload = {
         'statuses': statuses,
         'viewed_at': {msg.id: utc_iso(msg.viewed_at) if msg.viewed_at else None
@@ -943,6 +1085,8 @@ def get_message_statuses():
     }
     if updated:
         payload['updated'] = updated
+    if view_expires_at:
+        payload['view_expires_at'] = view_expires_at
     return jsonify(payload), 200
 
 
@@ -970,12 +1114,23 @@ def send_scheduled_now(message_id):
     msg.is_scheduled = False
     msg.scheduled_at = None
     msg.created_at = now
+    existing = {
+        row.user_id for row in MessageStatus.query.filter_by(
+            message_id=msg.id,
+        ).with_entities(MessageStatus.user_id).all()
+    }
+    if msg.sender_id not in existing:
+        db.session.add(MessageStatus(
+            message_id=msg.id, user_id=msg.sender_id, status='sent',
+        ))
+        existing.add(msg.sender_id)
     members = ChatMember.query.filter_by(chat_id=msg.chat_id, is_deleted=False).all()
     for m in members:
-        if m.user_id != msg.sender_id:
+        if m.user_id != msg.sender_id and m.user_id not in existing:
             db.session.add(MessageStatus(
                 message_id=msg.id, user_id=m.user_id, status='delivered', delivered_at=now
             ))
+            existing.add(m.user_id)
     chat = db.session.get(Chat, msg.chat_id)
     if chat:
         chat.updated_at = now

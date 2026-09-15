@@ -667,16 +667,30 @@ def delete_chat(chat_id):
             return jsonify({'error': 'چت یافت نشد'}), 404
         if chat.chat_type in ('group', 'channel') and member.role != 'owner':
             return jsonify({'error': 'فقط ادمین/مالک می‌تواند برای همه حذف کند'}), 403
+        now = datetime.utcnow()
         chat.is_deleted = True
         chat.is_deleted_for_all = True
-        chat.deleted_at = datetime.utcnow()
+        chat.deleted_at = now
         chat.deleted_by = user_id
         # soft delete all members
         ChatMember.query.filter_by(chat_id=chat_id).update({
             'is_deleted': True,
-            'deleted_at': datetime.utcnow(),
+            'deleted_at': now,
             'deleted_by': user_id,
         })
+        # Two-way delete also wipes the shared history for everyone at the
+        # same moment (Telegram-like Item 5): pins + messages disappear from
+        # every member's list together with the chat row itself.
+        Message.query.filter_by(chat_id=chat_id).update({
+            'is_deleted': True,
+            'is_deleted_for_all': True,
+            'deleted_at': now,
+            'deleted_by': user_id,
+        }, synchronize_session=False)
+        PinnedMessage.query.filter_by(chat_id=chat_id, is_deleted=False).update({
+            'is_deleted': True,
+            'deleted_at': now,
+        }, synchronize_session=False)
     else:
         member.is_deleted = True
         member.deleted_at = datetime.utcnow()

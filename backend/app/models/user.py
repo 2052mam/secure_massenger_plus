@@ -166,9 +166,18 @@ class UserDevice(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     last_active = db.Column(db.DateTime, default=datetime.utcnow)
 
+    # Push registration for future server-side pushes (Telegram-like). The
+    # current client uses polling + local notifications, which need no token,
+    # but the columns keep older/newer app versions compatible.
+    push_token = db.Column(db.String(512), nullable=True)
+    push_platform = db.Column(db.String(20), nullable=True)
+    notifications_enabled = db.Column(
+        db.Boolean, default=True, nullable=False, server_default=db.true())
+
     # Soft Delete
     is_deleted = db.Column(db.Boolean, default=False)
     deleted_at = db.Column(db.DateTime, nullable=True)
+    deleted_by = db.Column(db.String(36), nullable=True)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 

@@ -60,6 +60,15 @@ def upgrade_schema():
             'audio_title': 'VARCHAR(200) NULL',
             'audio_artist': 'VARCHAR(200) NULL',
             'audio_duration': 'FLOAT NULL',
+            'is_muted': 'BOOLEAN NOT NULL DEFAULT 0',
+            'view_duration': 'INTEGER NULL',
+            'view_expires_at': 'DATETIME NULL',
+        },
+        'user_devices': {
+            'push_token': 'VARCHAR(512) NULL',
+            'push_platform': 'VARCHAR(20) NULL',
+            'notifications_enabled': 'BOOLEAN NOT NULL DEFAULT 1',
+            'deleted_by': 'VARCHAR(36) NULL',
         },
         'media_files': {
             'title': 'VARCHAR(200) NULL',

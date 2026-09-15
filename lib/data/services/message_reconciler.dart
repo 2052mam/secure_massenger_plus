@@ -47,6 +47,7 @@ class MessageSyncResult {
   final Set<String> deletedIds;
   final Map<String, String> statuses;
   final Map<String, DateTime> viewedAt;
+  final Map<String, DateTime> viewExpiresAt;
   final Map<String, MessageSyncUpdate> updated;
 
   /// Ids of the currently pinned messages of the chat, newest first. Null on
@@ -57,6 +58,7 @@ class MessageSyncResult {
     this.deletedIds = const {},
     this.statuses = const {},
     this.viewedAt = const {},
+    this.viewExpiresAt = const {},
     this.updated = const {},
     this.pinnedIds,
   });
@@ -64,6 +66,7 @@ class MessageSyncResult {
   factory MessageSyncResult.fromJson(Map<String, dynamic> json) {
     final statuses = json['statuses'] as Map<String, dynamic>? ?? {};
     final views = json['viewed_at'] as Map<String, dynamic>? ?? {};
+    final expiry = json['view_expires_at'] as Map<String, dynamic>? ?? {};
     final pinned = json['pinned_ids'] as List?;
     final updatedList = (json['updated'] as List? ?? [])
         .whereType<Map<String, dynamic>>()
@@ -80,6 +83,12 @@ class MessageSyncResult {
       },
       viewedAt: {
         for (final entry in views.entries)
+          if (entry.value is String &&
+              parseApiDateTime(entry.value as String) != null)
+            entry.key: parseApiDateTime(entry.value as String)!,
+      },
+      viewExpiresAt: {
+        for (final entry in expiry.entries)
           if (entry.value is String &&
               parseApiDateTime(entry.value as String) != null)
             entry.key: parseApiDateTime(entry.value as String)!,
@@ -122,6 +131,8 @@ class MessageReconciler {
               status: newestStatus(message.status, update?.statuses[message.id]),
               content: edit?.content ?? message.content,
               viewedAt: message.viewedAt ?? update?.viewedAt[message.id],
+              viewExpiresAt:
+                  message.viewExpiresAt ?? update?.viewExpiresAt[message.id],
               isPinned: pinned == null
                   ? message.isPinned
                   : pinned.contains(message.id),

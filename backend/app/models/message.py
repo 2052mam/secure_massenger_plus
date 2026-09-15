@@ -20,9 +20,14 @@ class Message(db.Model):
     forwarded_from_id = db.Column(db.String(36), db.ForeignKey('messages.id'), nullable=True)
     forwarded_from_chat_id = db.Column(db.String(36), nullable=True)
     
-    # View Once
+    # View Once (+ timed photos: same rules, but the viewer auto-closes
+    # after ``view_duration`` seconds, Telegram-like).
     is_view_once = db.Column(db.Boolean, default=False)
     viewed_at = db.Column(db.DateTime, nullable=True)
+    # None = classic view-once (stays open until the viewer exits).
+    # 1..120 = timed photo, auto-close this many seconds after opening.
+    view_duration = db.Column(db.Integer, nullable=True)
+    view_expires_at = db.Column(db.DateTime, nullable=True)
 
     # Spoiler Mode
     is_spoiler = db.Column(db.Boolean, default=False, nullable=False)

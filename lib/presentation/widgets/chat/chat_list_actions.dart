@@ -73,28 +73,16 @@ Future<void> showChatContextMenu(
   );
   if (action == null || !context.mounted) return;
 
+  // Telegram-style delete: one-way (only for me) vs two-way (for everyone,
+  // wiping the whole history). Only private 1:1 chats offer "for everyone".
+  var deleteForAll = false;
   if (action == 'delete') {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(labels.delete),
-        content: Text(chat.displayTitle),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text(labels.cancel),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(
-              labels.delete,
-              style: const TextStyle(color: Colors.red),
-            ),
-          ),
-        ],
-      ),
+      builder: (ctx) => _DeleteChatDialog(chat: chat),
     );
-    if (confirmed != true || !context.mounted) return;
+    if (confirmed == null || !context.mounted) return;
+    deleteForAll = confirmed;
   }
 
   final api = ref.read(authenticatedSessionProvider).api;
@@ -119,7 +107,7 @@ Future<void> showChatContextMenu(
         await api.post('/chats/${chat.id}/mute', {'is_muted': false});
         break;
       case 'delete':
-        await api.post('/chats/${chat.id}/delete', {'for_all': false});
+        await api.post('/chats/${chat.id}/delete', {'for_all': deleteForAll});
         break;
     }
   } catch (error) {
@@ -131,4 +119,77 @@ Future<void> showChatContextMenu(
   }
   await ref.read(chatListProvider.notifier).refresh();
   await ref.read(archivedChatListProvider.notifier).refresh();
+}
+
+/// Delete confirmation with a one-way / two-way choice, like Telegram.
+/// Returns `true` when the chat must also be deleted for the other side.
+class _DeleteChatDialog extends StatefulWidget {
+  final ChatModel chat;
+  const _DeleteChatDialog({required this.chat});
+
+  @override
+  State<_DeleteChatDialog> createState() => _DeleteChatDialogState();
+}
+
+class _DeleteChatDialogState extends State<_DeleteChatDialog> {
+  bool _forAll = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final labels = ChatLabels.of(context);
+    // Groups/channels leave instead of deleting; two-way delete is a
+    // private-chat concept (the server also enforces this).
+    final canDeleteForAll = widget.chat.chatType == 'private';
+    return AlertDialog(
+      title: Text(labels.delete),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            widget.chat.displayTitle,
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _forAll
+                ? 'گفتگو و تمام تاریخچه‌ی آن برای هر دو طرف حذف می‌شود و قابل بازگشت نیست.'
+                : 'گفتگو فقط از لیست شما حذف می‌شود. طرف مقابل همچنان به تاریخچه دسترسی دارد.',
+            style: const TextStyle(fontSize: 13),
+          ),
+          if (canDeleteForAll) ...[
+            const SizedBox(height: 8),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: const Text(
+                'حذف برای طرف مقابل هم',
+                style: TextStyle(fontSize: 14),
+              ),
+              subtitle: const Text(
+                'تاریخچه‌ی کامل برای هر دو نفر پاک می‌شود',
+                style: TextStyle(fontSize: 12),
+              ),
+              value: _forAll,
+              activeColor: Colors.red,
+              onChanged: (v) => setState(() => _forAll = v ?? false),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(labels.cancel),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, canDeleteForAll && _forAll),
+          child: Text(
+            _forAll ? 'حذف برای همه' : labels.delete,
+            style: const TextStyle(color: Colors.red),
+          ),
+        ),
+      ],
+    );
+  }
 }

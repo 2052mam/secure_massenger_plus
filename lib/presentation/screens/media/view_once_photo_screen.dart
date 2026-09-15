@@ -9,18 +9,37 @@ import '../../../data/services/screen_privacy_service.dart';
 import '../../widgets/media/media_labels.dart';
 import '../../widgets/media/photo_canvas.dart';
 
+/// The server's single-use claim response for a view-once / timed photo.
+class ViewOnceClaim {
+  final DateTime viewedAt;
+  final DateTime? viewExpiresAt;
+  const ViewOnceClaim({required this.viewedAt, this.viewExpiresAt});
+}
+
 /// Download -> validate/decode -> atomically claim -> reveal.
 /// No disk cache, no thumbnail, no forwarding, and no claim on a failed load.
+///
+/// Timed photos (Item 2) additionally auto-close [viewDuration] seconds after
+/// the claim, with a Telegram-style countdown ring in the top bar.
 class ViewOncePhotoScreen extends StatefulWidget {
   final Future<Uint8List> Function() loadPhoto;
-  final Future<DateTime> Function() consumePhoto;
-  final ValueChanged<DateTime> onViewed;
+  final Future<ViewOnceClaim> Function() consumePhoto;
+  final ValueChanged<ViewOnceClaim> onViewed;
+
+  /// Seconds the photo stays visible after opening. Null = classic
+  /// view-once (visible until the screen is closed or backgrounded).
+  final int? viewDuration;
+
+  /// Server deadline if the photo was already consumed on another device.
+  final DateTime? viewExpiresAt;
 
   const ViewOncePhotoScreen({
     super.key,
     required this.loadPhoto,
     required this.consumePhoto,
     required this.onViewed,
+    this.viewDuration,
+    this.viewExpiresAt,
   });
 
   @override
@@ -35,11 +54,22 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
   bool _obscured = false;
   Future<void> Function()? _releasePrivacy;
   int _generation = 0;
+  Timer? _countdownTimer;
+  DateTime? _deadline;
+  Duration _remaining = Duration.zero;
+
+  bool get _timed => (widget.viewDuration ?? 0) > 0;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Already consumed elsewhere with an unexpired deadline: resume its
+    // countdown without re-claiming (the server would return 410).
+    final deadline = widget.viewExpiresAt;
+    if (deadline != null && deadline.isAfter(DateTime.now())) {
+      _deadline = deadline;
+    }
     unawaited(_prepare());
   }
 
@@ -71,8 +101,12 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
         codec.dispose();
       }
       if (!mounted || _obscured || generation != _generation) return;
-      final viewedAt = await widget.consumePhoto();
-      widget.onViewed(viewedAt);
+      final claim = await widget.consumePhoto();
+      widget.onViewed(claim);
+      if (!mounted || _obscured || generation != _generation) return;
+      // The server deadline wins over local clock math.
+      final serverDeadline =
+          claim.viewExpiresAt ?? _deadline ?? _fallbackDeadline(claim);
       if (!mounted || _obscured || generation != _generation) return;
       setState(() {
         // Use the already decoded frame: revealing cannot trigger a second
@@ -81,6 +115,7 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
         preparedImage = null;
         _loading = false;
       });
+      if (_timed) _startCountdown(serverDeadline);
     } catch (error) {
       if (!mounted || generation != _generation) return;
       setState(() {
@@ -94,8 +129,38 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
     }
   }
 
+  DateTime? _fallbackDeadline(ViewOnceClaim claim) {
+    final duration = widget.viewDuration;
+    if (duration == null || duration <= 0) return null;
+    return claim.viewedAt.add(Duration(seconds: duration));
+  }
+
+  void _startCountdown(DateTime? deadline) {
+    _countdownTimer?.cancel();
+    if (deadline == null) return;
+    _deadline = deadline;
+    _tick();
+    _countdownTimer = Timer.periodic(
+      const Duration(milliseconds: 200),
+      (_) => _tick(),
+    );
+  }
+
+  void _tick() {
+    final deadline = _deadline;
+    if (deadline == null || !mounted || _obscured) return;
+    final remaining = deadline.difference(DateTime.now());
+    if (remaining <= Duration.zero) {
+      _countdownTimer?.cancel();
+      _close();
+      return;
+    }
+    setState(() => _remaining = remaining);
+  }
+
   void _obscure() {
     ++_generation;
+    _countdownTimer?.cancel();
     if (mounted) setState(() => _obscured = true);
   }
 
@@ -116,6 +181,7 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
   @override
   void dispose() {
     ++_generation;
+    _countdownTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     final photo = _photo;
     _photo = null;
@@ -129,6 +195,10 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
   @override
   Widget build(BuildContext context) {
     final labels = MediaLabels.of(context);
+    final total = widget.viewDuration ?? 0;
+    final progress = !_timed || total <= 0
+        ? 1.0
+        : (_remaining.inMilliseconds / (total * 1000)).clamp(0.0, 1.0);
     return PopScope(
       onPopInvokedWithResult: (didPop, result) {
         if (didPop && !_obscured) _obscure();
@@ -188,15 +258,23 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
                         onPressed: _close,
                         icon: const Icon(Icons.close, color: Colors.white),
                       ),
-                      const Icon(
-                        Icons.timer_outlined,
-                        color: Colors.white70,
-                        size: 20,
-                      ),
+                      if (_timed && !_obscured && _photo != null)
+                        _CountdownBadge(
+                          remaining: _remaining,
+                          progress: progress,
+                        )
+                      else
+                        const Icon(
+                          Icons.timer_outlined,
+                          color: Colors.white70,
+                          size: 20,
+                        ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          labels.viewOnce,
+                          _timed
+                              ? 'عکس زمان‌دار (${widget.viewDuration} ثانیه)'
+                              : labels.viewOnce,
                           style: const TextStyle(color: Colors.white),
                         ),
                       ),
@@ -215,7 +293,9 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
                   top: false,
                   minimum: const EdgeInsets.all(16),
                   child: Text(
-                    labels.disappears,
+                    _timed
+                        ? 'این عکس ${_remaining.inSeconds + 1} ثانیه دیگر بسته می‌شود و دوباره باز نخواهد شد.'
+                        : labels.disappears,
                     textAlign: TextAlign.center,
                     style: const TextStyle(color: Colors.white70, fontSize: 13),
                   ),
@@ -224,6 +304,45 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Telegram-style countdown ring with the remaining seconds in the middle.
+class _CountdownBadge extends StatelessWidget {
+  final Duration remaining;
+  final double progress;
+  const _CountdownBadge({required this.remaining, required this.progress});
+
+  @override
+  Widget build(BuildContext context) {
+    final seconds = remaining.inSeconds + 1;
+    return SizedBox(
+      width: 34,
+      height: 34,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          SizedBox(
+            width: 30,
+            height: 30,
+            child: CircularProgressIndicator(
+              value: progress,
+              strokeWidth: 3,
+              backgroundColor: Colors.white24,
+              valueColor: const AlwaysStoppedAnimation<Color>(Colors.orange),
+            ),
+          ),
+          Text(
+            '$seconds',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
       ),
     );
   }

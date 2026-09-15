@@ -41,6 +41,10 @@ class MessageModel extends Equatable {
   final int? fileSize;
   final bool isPinned;
   final DateTime? viewedAt;
+  // Timed photo (Item 2): null = classic view-once (open until exit),
+  // otherwise auto-close N seconds after opening (Telegram-like).
+  final int? viewDuration;
+  final DateTime? viewExpiresAt;
   final bool isEdited;
   final DateTime? editedAt;
   // Encrypted (password-protected) messages
@@ -84,6 +88,8 @@ class MessageModel extends Equatable {
     this.fileSize,
     this.isPinned = false,
     this.viewedAt,
+    this.viewDuration,
+    this.viewExpiresAt,
     this.isEdited = false,
     this.editedAt,
     this.isEncrypted = false,
@@ -103,6 +109,11 @@ class MessageModel extends Equatable {
   });
 
   bool get isLocation => messageType == 'location' || messageType == 'live_location';
+  /// A view-once photo with a countdown (10s in the UI, 1-120s server-side).
+  bool get isTimedPhoto => isViewOnce && (viewDuration ?? 0) > 0;
+  /// True once the server deadline passed (or the photo was consumed).
+  bool get isTimedExpired =>
+      viewExpiresAt != null && !viewExpiresAt!.isAfter(DateTime.now());
   bool get isLiveLocation => messageType == 'live_location';
   bool get isLiveActive => isLiveLocation && liveUntil != null && liveUntil!.isAfter(DateTime.now());
   bool get isMusic => messageType == 'audio' || messageType == 'music';
@@ -140,6 +151,10 @@ class MessageModel extends Equatable {
       viewedAt: json['viewed_at'] != null
           ? parseApiDateTime(json['viewed_at'] as String?)
           : null,
+      viewDuration: (json['view_duration'] as num?)?.toInt(),
+      viewExpiresAt: json['view_expires_at'] != null
+          ? parseApiDateTime(json['view_expires_at'] as String?)
+          : null,
       isEdited: json['is_edited'] as bool? ?? false,
       editedAt: json['edited_at'] != null
           ? parseApiDateTime(json['edited_at'] as String?)
@@ -174,6 +189,8 @@ class MessageModel extends Equatable {
     DateTime? scheduledAt,
     bool? isPinned,
     DateTime? viewedAt,
+    int? viewDuration,
+    DateTime? viewExpiresAt,
     bool? isEdited,
     DateTime? editedAt,
     bool? isEncrypted,
@@ -205,6 +222,8 @@ class MessageModel extends Equatable {
       fileSize: fileSize,
       isPinned: isPinned ?? this.isPinned,
       viewedAt: viewedAt ?? this.viewedAt,
+      viewDuration: viewDuration ?? this.viewDuration,
+      viewExpiresAt: viewExpiresAt ?? this.viewExpiresAt,
       isEdited: isEdited ?? this.isEdited,
       editedAt: editedAt ?? this.editedAt,
       isEncrypted: isEncrypted ?? this.isEncrypted,
@@ -217,6 +236,7 @@ class MessageModel extends Equatable {
       audioTitle: audioTitle,
       audioArtist: audioArtist,
       audioDuration: audioDuration,
+      isMuted: isMuted,
       createdAt: createdAt,
       status: status ?? this.status,
       reactions: reactions ?? this.reactions,
@@ -263,6 +283,8 @@ class MessageModel extends Equatable {
     fileSize,
     isPinned,
     viewedAt,
+    viewDuration,
+    viewExpiresAt,
     isEdited,
     editedAt,
     isEncrypted,

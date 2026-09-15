@@ -187,6 +187,9 @@ def serialize_messages(messages, user_id, status_override=None):
             'scheduled_at': utc_iso(msg.scheduled_at) if msg.scheduled_at else None,
             'is_pinned': msg.id in pinned_ids,
             'viewed_at': utc_iso(msg.viewed_at) if msg.viewed_at else None,
+            'view_duration': getattr(msg, 'view_duration', None),
+            'view_expires_at': utc_iso(getattr(msg, 'view_expires_at', None))
+            if getattr(msg, 'view_expires_at', None) else None,
             'is_edited': bool(msg.is_edited),
             'edited_at': utc_iso(msg.edited_at) if msg.edited_at else None,
             # Encrypted (password-protected) messages

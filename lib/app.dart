@@ -3,26 +3,81 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'core/theme/app_theme.dart';
+import 'data/services/background_poll_service.dart';
+import 'data/services/notification_service.dart';
 import 'presentation/providers/theme_provider.dart';
 import 'presentation/providers/locale_provider.dart';
 import 'presentation/providers/auth_provider.dart';
 import 'presentation/screens/auth/login_screen.dart';
+import 'presentation/screens/chat/chat_screen.dart';
 import 'presentation/screens/home/main_shell.dart';
 
-class SecureMessengerApp extends ConsumerWidget {
+class SecureMessengerApp extends ConsumerStatefulWidget {
   const SecureMessengerApp({super.key});
 
+  /// Lets notification taps deep-link into a chat from anywhere.
+  static final navigatorKey = GlobalKey<NavigatorState>();
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SecureMessengerApp> createState() => _SecureMessengerAppState();
+}
+
+class _SecureMessengerAppState extends ConsumerState<SecureMessengerApp> {
+  bool _launchHandled = false;
+  bool _bgStarted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    NotificationService.onNotificationTap = _openChat;
+  }
+
+  void _openChat(String chatId, String title, String chatType) {
+    final nav = SecureMessengerApp.navigatorKey.currentState;
+    if (nav == null) return;
+    nav.push(
+      MaterialPageRoute<void>(
+        builder: (_) => ChatScreen(
+          chatId: chatId,
+          title: title,
+          chatType: chatType,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final themeMode = ref.watch(themeModeProvider);
     final locale = ref.watch(localeProvider);
     final authState = ref.watch(authNotifierProvider);
+    final userId = authState.valueOrNull?.id;
+
+    // Notification taps only make sense while signed in.
+    NotificationService.appReady = userId != null;
+    if (userId != null && !_bgStarted) {
+      _bgStarted = true;
+      // Ask once per login: Android 13+ / iOS both need explicit consent.
+      NotificationService().requestPermissions();
+      BackgroundPollService.start();
+      if (!_launchHandled) {
+        _launchHandled = true;
+        // A tap that launched the app from killed state: open that chat.
+        Future.delayed(
+          const Duration(milliseconds: 800),
+          () => NotificationService().handleLaunchDetails(),
+        );
+      }
+    } else if (userId == null) {
+      _bgStarted = false;
+    }
 
     return MaterialApp(
       // An identity change discards every route from the previous session,
       // including nested login/register/2FA and account-management routes.
       // Theme, locale and profile refreshes for the SAME user retain routes.
-      key: ValueKey(authState.valueOrNull?.id ?? 'signed-out'),
+      key: ValueKey(userId ?? 'signed-out'),
+      navigatorKey: SecureMessengerApp.navigatorKey,
       title: 'SecureMessenger',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,

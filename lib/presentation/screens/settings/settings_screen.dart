@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../data/services/storage_service.dart';
 
 import '../../../data/services/api_service.dart';
+import '../../../data/services/background_poll_service.dart';
+import '../../../data/services/notification_service.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/locale_provider.dart';
 import '../../providers/theme_provider.dart';
@@ -33,6 +35,7 @@ class SettingsScreen extends ConsumerWidget {
       body: SafeArea(
         child: ListView(
           children: [
+            const _NotificationTile(),
             if (user != null)
               ListTile(
                 leading: CircleAvatar(
@@ -430,6 +433,70 @@ class SettingsScreen extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Master notification switch (Item 3). Works without any push server: the
+/// app polls while alive and a WorkManager task polls while it is killed.
+/// No Firebase account, no Google services, no sanction exposure.
+class _NotificationTile extends StatefulWidget {
+  const _NotificationTile();
+
+  @override
+  State<_NotificationTile> createState() => _NotificationTileState();
+}
+
+class _NotificationTileState extends State<_NotificationTile> {
+  bool _enabled = true;
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    NotificationService().isEnabled().then((v) {
+      if (mounted) setState(() => {_enabled = v, _loaded = true});
+    });
+  }
+
+  Future<void> _toggle(bool value) async {
+    setState(() => _enabled = value);
+    if (value) {
+      await NotificationService().requestPermissions();
+      await BackgroundPollService.start();
+    } else {
+      await BackgroundPollService.stop();
+    }
+    await NotificationService().setEnabled(value);
+    // Tell the server too, so future push channels respect the choice.
+    try {
+      await ApiService().post('/notifications/register', {
+        'notifications_enabled': value,
+      });
+    } catch (_) {}
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Icon(
+        _enabled
+            ? Icons.notifications_active_outlined
+            : Icons.notifications_off_outlined,
+      ),
+      title: const Text('اعلان پیام‌های جدید'),
+      subtitle: const Text(
+        'نمایش اعلان حتی وقتی برنامه بسته است (بدون نیاز به گوگل)',
+        style: TextStyle(fontSize: 12),
+      ),
+      trailing: _loaded
+          ? Switch(value: _enabled, onChanged: _toggle)
+          : const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
     );
   }
 }
