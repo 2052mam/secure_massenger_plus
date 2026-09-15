@@ -1944,7 +1944,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       builder: (_) => PollCreateSheet(chatId: widget.chatId, api: _api),
     );
     if (created == true && mounted) {
-      await _pollNow();
+      _pollNow();
       _scrollToBottom();
     }
   }

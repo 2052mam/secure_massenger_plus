@@ -144,7 +144,7 @@ class ChatListNotifier extends StateNotifier<AsyncValue<ChatListState>> {
       if (!_archived) {
         for (final chat in newState.chats) {
           final prevId = _lastMessageIds[chat.id];
-          final curId = chat.lastMessage?.id ?? chat.lastMessageId;
+          final curId = chat.lastMessage?.id;
           final prevUnread = _lastUnread[chat.id] ?? 0;
           final curUnread = chat.unreadCount;
           if (curId != null && curId != prevId && curUnread > prevUnread) {

@@ -142,13 +142,15 @@ class _ProfilePhotosScreenState extends ConsumerState<ProfilePhotosScreen> {
     final url = urls[_index < 0 || _index >= urls.length ? 0 : _index];
     try {
       final resolved = resolveMediaUrl(null, existingUrl: url) ?? url;
-      final file = await MediaDownloadService.downloadMedia(
-        url: resolved,
+      final fname = 'profile_${widget.userId ?? 'me'}_$_index.jpg';
+      final path = await MediaDownloadService.downloadMedia(
+        mediaUrl: resolved,
+        fileName: fname,
         token: ref.read(authenticatedSessionProvider).token,
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('ذخیره شد: ${file.path}')),
+        SnackBar(content: Text(path != null ? 'ذخیره شد: $path' : 'ذخیره شد')),
       );
     } catch (e) {
       if (!mounted) return;
