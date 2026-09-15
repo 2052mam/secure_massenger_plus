@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_cors import CORS
@@ -48,6 +48,50 @@ def create_app():
     migrate.init_app(app, db)
     jwt.init_app(app)
     CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+    # Token revocation via token_version: when a device is terminated,
+    # the user's token_version is incremented and old JWTs become invalid.
+    @jwt.token_in_blocklist_loader
+    def check_token_revoked(jwt_header, jwt_payload):
+        try:
+            user_id = jwt_payload.get("sub")
+            token_version = jwt_payload.get("token_version")
+            if user_id is None or token_version is None:
+                # Old tokens without version remain valid until expiry (backward compat).
+                return False
+            from app.models.user import User
+            user = db.session.get(User, user_id)
+            if user is None:
+                return True
+            current = getattr(user, "token_version", 0) or 0
+            return int(token_version) != int(current)
+        except Exception:
+            return False
+
+    @jwt.expired_token_loader
+    def expired_token_callback(jwt_header, jwt_payload):
+        return {"error": "توکن منقضی شده است"}, 401
+
+    @jwt.invalid_token_loader
+    def invalid_token_callback(err):
+        return {"error": f"توکن نامعتبر: {err}"}, 422
+
+    @jwt.unauthorized_loader
+    def missing_token_callback(err):
+        return {"error": "توکن الزامی است"}, 401
+
+    # Ensure all unhandled errors return JSON, not HTML <!doctype>
+    @app.errorhandler(404)
+    def handle_404(e):
+        if request.path.startswith("/api/"):
+            return {"error": "یافت نشد"}, 404
+        return e
+
+    @app.errorhandler(500)
+    def handle_500(e):
+        if request.path.startswith("/api/"):
+            return {"error": "خطای سرور"}, 500
+        return e
 
     from app.api.auth import auth_bp
     from app.api.users import users_bp

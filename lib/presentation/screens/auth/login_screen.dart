@@ -96,15 +96,40 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   Future<void> _submitPhone() async {
+    final mobile = _mobileCtrl.text.trim();
+    // Item 7: Do NOT send verification code immediately for unregistered users.
+    // First check if the number exists; if not, redirect to registration.
+    try {
+      final check = await ApiService().post('/auth/check-phone', {
+        'mobile_number': mobile,
+      });
+      final exists = check['exists'] == true;
+      if (!exists && mounted) {
+        // Redirect to registration screen to complete necessary steps first.
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => RegisterScreen(initialMobile: mobile),
+          ),
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('این شماره ثبت نشده — لطفاً ابتدا ثبت‌نام کنید')),
+          );
+        }
+        return;
+      }
+    } catch (_) {
+      // If check fails (network), proceed to request code as fallback.
+    }
     final response = await ApiService().post('/auth/request-phone-code', {
-      'mobile_number': _mobileCtrl.text.trim(),
+      'mobile_number': mobile,
     });
     if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PhoneVerificationScreen(
           verificationId: response['verification_id'] as String,
-          mobileNumber: response['mobile_number'] as String? ?? _mobileCtrl.text.trim(),
+          mobileNumber: response['mobile_number'] as String? ?? mobile,
           flow: PhoneVerificationFlow.login,
         ),
       ),

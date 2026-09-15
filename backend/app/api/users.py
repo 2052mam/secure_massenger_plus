@@ -426,21 +426,79 @@ def search_users():
         if not blocked:
             result_users.append(u.to_dict())
 
-    from app.models.chat import Chat
-    chats = Chat.query.filter(
+    from app.models.chat import Chat, ChatMember
+    # Public channels/groups (searchable by anyone)
+    public_chats = Chat.query.filter(
         Chat.is_deleted == False,
         Chat.is_public == True,
-        Chat.chat_type == 'channel',
-        (Chat.title.ilike(f'%{q}%') | Chat.username.ilike(f'%{q}%'))
+        Chat.chat_type.in_(['channel', 'group']),
+        (Chat.title.ilike(f'%{q}%') | Chat.username.ilike(f'%{q}%') | Chat.description.ilike(f'%{q}%'))
     ).limit(20).all()
 
-    result_chats = [{
-        'id': c.id,
-        'chat_type': c.chat_type,
-        'title': c.title,
-        'username': c.username,
-        'avatar_url': c.avatar_url,
-    } for c in chats]
+    # Private groups where the current user is a member (search among MY groups)
+    # This fixes Item 9: groups must appear in search even if not public.
+    member_chat_ids = [m.chat_id for m in ChatMember.query.filter_by(user_id=current_id, is_deleted=False).all()]
+    private_groups = []
+    if member_chat_ids:
+        private_groups = Chat.query.filter(
+            Chat.id.in_(member_chat_ids),
+            Chat.is_deleted == False,
+            Chat.chat_type.in_(['group', 'channel', 'private']),
+            (Chat.title.ilike(f'%{q}%') | Chat.username.ilike(f'%{q}%'))
+        ).limit(30).all()
+
+    # Also search via other_user display name for private chats (direct messages)
+    # Private chats are represented via ChatMember + User, not Chat.title
+    # So also search users that are chat partners?
+    # Combine and deduplicate by id
+    seen = set()
+    result_chats = []
+    for c in public_chats + private_groups:
+        if c.id in seen:
+            continue
+        seen.add(c.id)
+        result_chats.append({
+            'id': c.id,
+            'chat_type': c.chat_type,
+            'title': c.title,
+            'username': c.username,
+            'avatar_url': c.avatar_url,
+        })
+
+    # Additionally, for private chats where title is null, search the other user's name
+    # via membership: find private chats where other user's display name matches q
+    # This surfaces private conversations in search.
+    if member_chat_ids:
+        # Find other members in same private chats whose user matches search
+        from sqlalchemy import and_
+        private_chat_ids = [c.id for c in Chat.query.filter(Chat.id.in_(member_chat_ids), Chat.chat_type=='private', Chat.is_deleted==False).all()]
+        if private_chat_ids:
+            # Find users matching q that share a private chat
+            matching_users = User.query.filter(
+                User.is_deleted==False,
+                User.is_active==True,
+                User.id != current_id,
+                User.display_name.ilike(f'%{q}%')
+            ).limit(20).all()
+            for u in matching_users:
+                # Check if shares private chat
+                shared = ChatMember.query.filter(
+                    ChatMember.chat_id.in_(private_chat_ids),
+                    ChatMember.user_id==u.id,
+                    ChatMember.is_deleted==False
+                ).first()
+                if shared and shared.chat_id not in seen:
+                    seen.add(shared.chat_id)
+                    chat_obj = next((c for c in Chat.query.filter(Chat.id==shared.chat_id).all()), None)
+                    if chat_obj:
+                        result_chats.append({
+                            'id': shared.chat_id,
+                            'chat_type': 'private',
+                            'title': u.display_name,
+                            'username': u.username,
+                            'avatar_url': u.avatar_url if u.show_profile_photo else None,
+                            'other_user_id': u.id,
+                        })
 
     return jsonify({'users': result_users, 'chats': result_chats}), 200
 

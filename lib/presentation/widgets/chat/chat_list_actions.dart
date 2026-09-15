@@ -73,28 +73,39 @@ Future<void> showChatContextMenu(
   );
   if (action == null || !context.mounted) return;
 
+  // Will handle actual delete after choosing for_all
+  String? deleteForAllChoice;
   if (action == 'delete') {
-    final confirmed = await showDialog<bool>(
+    deleteForAllChoice = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(labels.delete),
-        content: Text(chat.displayTitle),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(chat.displayTitle),
+            const SizedBox(height: 12),
+            const Text('حذف تاریخچه:', style: TextStyle(fontWeight: FontWeight.bold)),
+          ],
+        ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
+            onPressed: () => Navigator.pop(ctx, null),
             child: Text(labels.cancel),
           ),
           TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(
-              labels.delete,
-              style: const TextStyle(color: Colors.red),
-            ),
+            onPressed: () => Navigator.pop(ctx, 'me'),
+            child: const Text('فقط برای من', style: TextStyle(color: Colors.orange)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'all'),
+            child: const Text('برای همه (هر دو طرف)', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
     );
-    if (confirmed != true || !context.mounted) return;
+    if (deleteForAllChoice == null || !context.mounted) return;
   }
 
   final api = ref.read(authenticatedSessionProvider).api;
@@ -119,7 +130,8 @@ Future<void> showChatContextMenu(
         await api.post('/chats/${chat.id}/mute', {'is_muted': false});
         break;
       case 'delete':
-        await api.post('/chats/${chat.id}/delete', {'for_all': false});
+        final forAll = deleteForAllChoice == 'all';
+        await api.post('/chats/${chat.id}/delete', {'for_all': forAll});
         break;
     }
   } catch (error) {

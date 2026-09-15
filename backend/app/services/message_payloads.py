@@ -1,5 +1,7 @@
 """Shared, non-recursive message payloads for send, history, search and polling."""
 
+from datetime import datetime
+
 from app.services.timestamps import utc_iso
 
 from app import db
@@ -100,113 +102,129 @@ def serialize_messages(messages, user_id, status_override=None):
         reactions_by_msg.setdefault(r.message_id, []).append(r)
     result = []
     for msg in messages:
-        sender = senders.get(msg.sender_id)
-        chat = chats[msg.chat_id]
-        broadcast = chat.chat_type == 'channel'
-        channel_sender = {'id': chat.id, 'username': chat.username or '',
-                          'display_name': chat.title or 'Channel', 'avatar_url': chat.avatar_url,
-                          'is_online': False} if broadcast else None
-        reply = None
-        if msg.reply_to_id:
-            original = originals.get(msg.reply_to_id)
-            # Also protects old/corrupt cross-chat reply references.
-            if original is None or original.chat_id != msg.chat_id:
-                reply = {'id': msg.reply_to_id, 'is_unavailable': True}
+        try:
+            sender = senders.get(msg.sender_id)
+            chat = chats.get(msg.chat_id)
+            if chat is None:
+                # Chat was deleted or not fetched; skip rather than crash whole page (doctype error).
+                continue
+            broadcast = chat.chat_type == 'channel'
+            channel_sender = {'id': chat.id, 'username': chat.username or '',
+                              'display_name': chat.title or 'Channel', 'avatar_url': chat.avatar_url,
+                              'is_online': False} if broadcast else None
+            reply = None
+            if msg.reply_to_id:
+                original = originals.get(msg.reply_to_id)
+                # Also protects old/corrupt cross-chat reply references.
+                if original is None or original.chat_id != msg.chat_id:
+                    reply = {'id': msg.reply_to_id, 'is_unavailable': True}
+                else:
+                    author = senders.get(original.sender_id)
+                    reply = {
+                        'id': original.id,
+                        'sender_id': chat.id if broadcast else original.sender_id,
+                        'sender_name': chat.title if broadcast else author.display_name if author else None,
+                        'message_type': original.message_type,
+                        'content': (original.content or '')[:240]
+                        if not original.is_view_once else None,
+                        'is_view_once': original.is_view_once,
+                        'is_spoiler': bool(original.is_spoiler),
+                        'is_unavailable': False,
+                        # Never include a thumbnail or caption for ephemeral media.
+                        'media_url': f'/api/v1/media/{original.media_id}'
+                        if original.media_id and original.message_type == 'image'
+                        and not original.is_view_once else None,
+                    }
+
+            message_statuses = statuses.get(msg.id, [])
+            if status_override is not None:
+                status = status_override
+            elif msg.sender_id == user_id:
+                recipient_statuses = [s.status for s in message_statuses
+                                      if s.user_id != user_id]
+                status = ('read' if 'read' in recipient_statuses else
+                          'delivered' if 'delivered' in recipient_statuses else 'sent')
             else:
-                author = senders.get(original.sender_id)
-                reply = {
-                    'id': original.id,
-                    'sender_id': chat.id if broadcast else original.sender_id,
-                    'sender_name': chat.title if broadcast else author.display_name if author else None,
-                    'message_type': original.message_type,
-                    'content': (original.content or '')[:240]
-                    if not original.is_view_once else None,
-                    'is_view_once': original.is_view_once,
-                    'is_spoiler': bool(original.is_spoiler),
-                    'is_unavailable': False,
-                    # Never include a thumbnail or caption for ephemeral media.
-                    'media_url': f'/api/v1/media/{original.media_id}'
-                    if original.media_id and original.message_type == 'image'
-                    and not original.is_view_once else None,
-                }
+                status = next((s.status for s in message_statuses
+                               if s.user_id == user_id), 'delivered')
 
-        message_statuses = statuses.get(msg.id, [])
-        if status_override is not None:
-            status = status_override
-        elif msg.sender_id == user_id:
-            recipient_statuses = [s.status for s in message_statuses
-                                  if s.user_id != user_id]
-            status = ('read' if 'read' in recipient_statuses else
-                      'delivered' if 'delivered' in recipient_statuses else 'sent')
-        else:
-            status = next((s.status for s in message_statuses
-                           if s.user_id == user_id), 'delivered')
+            # Reactions summary for this message
+            reactions = reactions_by_msg.get(msg.id, [])
+            # group by emoji
+            emoji_counts = {}
+            me_emojis = set()
+            for rr in reactions:
+                emoji_counts[rr.emoji] = emoji_counts.get(rr.emoji, 0) + 1
+                if rr.user_id == user_id:
+                    me_emojis.add(rr.emoji)
+            reactions_summary = [
+                {'emoji': e, 'count': c, 'me': e in me_emojis}
+                for e, c in sorted(emoji_counts.items(), key=lambda x: -x[1])
+            ]
 
-        # Reactions summary for this message
-        reactions = reactions_by_msg.get(msg.id, [])
-        # group by emoji
-        emoji_counts = {}
-        me_emojis = set()
-        for rr in reactions:
-            emoji_counts[rr.emoji] = emoji_counts.get(rr.emoji, 0) + 1
-            if rr.user_id == user_id:
-                me_emojis.add(rr.emoji)
-        reactions_summary = [
-            {'emoji': e, 'count': c, 'me': e in me_emojis}
-            for e, c in sorted(emoji_counts.items(), key=lambda x: -x[1])
-        ]
+            # Telegram-like admin signature: channel posts show the channel as
+            # sender BUT keep the publishing admin's name above the post.
+            author = None
+            if broadcast and sender is not None:
+                author = {'id': sender.id, 'display_name': sender.display_name,
+                          'username': sender.username}
+            elif not broadcast and sender is not None and chat.chat_type in ('group', 'channel'):
+                author = {'id': sender.id, 'display_name': sender.display_name,
+                          'username': sender.username}
 
-        # Telegram-like admin signature: channel posts show the channel as
-        # sender BUT keep the publishing admin's name above the post.
-        author = None
-        if broadcast and sender is not None:
-            author = {'id': sender.id, 'display_name': sender.display_name,
-                      'username': sender.username}
-        elif not broadcast and sender is not None and chat.chat_type in ('group', 'channel'):
-            author = {'id': sender.id, 'display_name': sender.display_name,
-                      'username': sender.username}
-
-        result.append({
-            'id': msg.id,
-            'chat_id': msg.chat_id,
-            'sender_id': chat.id if broadcast else msg.sender_id,
-            'sender': channel_sender if broadcast else sender.to_dict() if sender else None,
-            # Publishing admin (channel signature / group author label).
-            'author': author,
-            'message_type': msg.message_type,
-            'content': msg.content,
-            'media_id': msg.media_id,
-            'media_url': f'/api/v1/media/{msg.media_id}'
-            if msg.media_id and not msg.is_view_once else None,
-            'reply_to_id': msg.reply_to_id,
-            'reply_to': reply,
-            'forwarded_from_id': msg.forwarded_from_id,
-            'is_view_once': msg.is_view_once,
-            'is_spoiler': bool(msg.is_spoiler),
-            'is_scheduled': bool(msg.is_scheduled),
-            'scheduled_at': utc_iso(msg.scheduled_at) if msg.scheduled_at else None,
-            'is_pinned': msg.id in pinned_ids,
-            'viewed_at': utc_iso(msg.viewed_at) if msg.viewed_at else None,
-            'is_edited': bool(msg.is_edited),
-            'edited_at': utc_iso(msg.edited_at) if msg.edited_at else None,
-            # Encrypted (password-protected) messages
-            'is_encrypted': bool(getattr(msg, 'is_encrypted', False)),
-            'encryption_hint': getattr(msg, 'encryption_hint', None),
-            # Secure-mode messages
-            'is_secure': bool(getattr(msg, 'is_secure', False)),
-            # Location messages
-            'latitude': getattr(msg, 'latitude', None),
-            'longitude': getattr(msg, 'longitude', None),
-            'location_title': getattr(msg, 'location_title', None),
-            'live_until': utc_iso(getattr(msg, 'live_until', None)) if getattr(msg, 'live_until', None) else None,
-            # Music / audio messages
-            'audio_title': getattr(msg, 'audio_title', None),
-            'audio_artist': getattr(msg, 'audio_artist', None),
-            'audio_duration': getattr(msg, 'audio_duration', None),
-            # Video editor mute flag
-            'is_muted': bool(getattr(msg, 'is_muted', False)),
-            'created_at': utc_iso(msg.created_at),
-            'status': status,
-            'reactions': reactions_summary,
-        })
+            result.append({
+                'id': msg.id,
+                'chat_id': msg.chat_id,
+                'sender_id': chat.id if broadcast else msg.sender_id,
+                'sender': channel_sender if broadcast else sender.to_dict() if sender else None,
+                # Publishing admin (channel signature / group author label).
+                'author': author,
+                'message_type': msg.message_type or 'text',
+                'content': msg.content,
+                'media_id': msg.media_id,
+                'media_url': f'/api/v1/media/{msg.media_id}'
+                if msg.media_id and not msg.is_view_once else None,
+                'reply_to_id': msg.reply_to_id,
+                'reply_to': reply,
+                'forwarded_from_id': msg.forwarded_from_id,
+                'is_view_once': bool(getattr(msg, 'is_view_once', False)),
+                'is_spoiler': bool(getattr(msg, 'is_spoiler', False)),
+                'is_scheduled': bool(getattr(msg, 'is_scheduled', False)),
+                'scheduled_at': utc_iso(getattr(msg, 'scheduled_at', None)) if getattr(msg, 'scheduled_at', None) else None,
+                'is_pinned': msg.id in pinned_ids,
+                'viewed_at': utc_iso(getattr(msg, 'viewed_at', None)) if getattr(msg, 'viewed_at', None) else None,
+                'is_edited': bool(getattr(msg, 'is_edited', False)),
+                'edited_at': utc_iso(getattr(msg, 'edited_at', None)) if getattr(msg, 'edited_at', None) else None,
+                # Encrypted (password-protected) messages
+                'is_encrypted': bool(getattr(msg, 'is_encrypted', False)),
+                'encryption_hint': getattr(msg, 'encryption_hint', None),
+                # Secure-mode messages
+                'is_secure': bool(getattr(msg, 'is_secure', False)),
+                # Location messages
+                'latitude': getattr(msg, 'latitude', None),
+                'longitude': getattr(msg, 'longitude', None),
+                'location_title': getattr(msg, 'location_title', None),
+                'live_until': utc_iso(getattr(msg, 'live_until', None)) if getattr(msg, 'live_until', None) else None,
+                # Music / audio messages
+                'audio_title': getattr(msg, 'audio_title', None),
+                'audio_artist': getattr(msg, 'audio_artist', None),
+                'audio_duration': getattr(msg, 'audio_duration', None),
+                # Video editor mute flag
+                'is_muted': bool(getattr(msg, 'is_muted', False)),
+                # Timed photo (view-once with TTL)
+                'view_once_ttl': getattr(msg, 'view_once_ttl', None),
+                # Poll data (if any)
+                'poll': getattr(msg, 'poll_json', None),
+                'created_at': utc_iso(msg.created_at) or datetime.utcnow().isoformat() + 'Z',
+                'status': status,
+                'reactions': reactions_summary,
+            })
+        except Exception as _ex:
+            # One broken row must not crash the entire history page.
+            try:
+                from flask import current_app
+                current_app.logger.warning(f"serialize_messages skip broken {getattr(msg, 'id', '?')}: {_ex}")
+            except Exception:
+                pass
+            continue
     return result

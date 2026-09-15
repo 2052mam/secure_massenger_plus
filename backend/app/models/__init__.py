@@ -9,6 +9,7 @@ from app.models.report import Report
 from app.models.sticker import StickerPack, Sticker
 from app.models.gif import SavedGif
 from app.models.story import Story, StoryView
+from app.models.poll import PollVote
 
 __all__ = [
     'User', 'UserDevice', 'UserSession', 'PhoneVerification', 'BlockList',
@@ -17,5 +18,6 @@ __all__ = [
     'Message', 'MessageStatus', 'MessageReaction', 'PinnedMessage', 'MessageHide',
     'MediaFile', 'UserPhoto', 'SearchHistory', 'AuditLog',
     'Report', 'StickerPack', 'Sticker', 'SavedGif',
-    'Story', 'StoryView'
+    'Story', 'StoryView',
+    'PollVote'
 ]

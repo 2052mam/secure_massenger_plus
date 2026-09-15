@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../../core/utils/chat_invite_link.dart';
 import '../../../data/models/message_model.dart';
 import '../../../data/models/reply_preview_model.dart';
+import '../../../data/services/api_service.dart';
 import '../../../data/services/media_playback_coordinator.dart';
 import '../media/media_labels.dart';
 import '../media/video_message_player.dart';
@@ -12,6 +13,7 @@ import '../media/voice_message_player.dart';
 import '../music/music_message_bubble.dart';
 import 'encrypted_bubble.dart';
 import 'location_bubble.dart';
+import 'poll_bubble.dart';
 import 'reaction_bar.dart';
 import 'reply_preview.dart';
 import 'message_text.dart';
@@ -37,6 +39,8 @@ class MessageBubble extends StatelessWidget {
   final ValueChanged<String>? onMentionTap;
   final List<MessageModel> musicQueue;
   final String chatTitle;
+  final ApiService? api;
+  final VoidCallback? onPollUpdated;
 
   const MessageBubble({
     super.key,
@@ -58,6 +62,8 @@ class MessageBubble extends StatelessWidget {
     this.onMentionTap,
     this.musicQueue = const [],
     this.chatTitle = '',
+    this.api,
+    this.onPollUpdated,
   });
 
   @override
@@ -184,11 +190,14 @@ class MessageBubble extends StatelessWidget {
               )
             else if (message.isLocation)
               LocationBubble(message: message, isMine: isMine)
+            else if (message.isPoll && message.poll != null)
+              PollBubble(message: message, api: api ?? ApiService(), isMine: isMine, foreground: fg, onUpdated: onPollUpdated)
             else if (message.isViewOnce)
               _ViewOnceTile(
                 viewed: message.viewedAt != null,
                 isMine: isMine,
                 color: fg,
+                ttlSeconds: message.viewOnceTtl,
                 onTap: !isMine && message.viewedAt == null
                     ? onOpenViewOnce
                     : null,
@@ -455,12 +464,14 @@ class _ViewOnceTile extends StatelessWidget {
   final bool viewed;
   final bool isMine;
   final Color color;
+  final int? ttlSeconds;
   final VoidCallback? onTap;
 
   const _ViewOnceTile({
     required this.viewed,
     required this.isMine,
     required this.color,
+    this.ttlSeconds,
     this.onTap,
   });
 
@@ -499,7 +510,11 @@ class _ViewOnceTile extends StatelessWidget {
                     if (!viewed) ...[
                       const SizedBox(height: 3),
                       Text(
-                        isMine ? labels.sentOnce : labels.tapToOpen,
+                        ttlSeconds != null && ttlSeconds! > 0
+                            ? (isMine
+                                ? 'عکس زمان‌دار • $ttlSeconds ثانیه پس از مشاهده'
+                                : 'عکس زمان‌دار — ضربه بزنید ($ttlSeconds ثانیه)')
+                            : (isMine ? labels.sentOnce : labels.tapToOpen),
                         style: TextStyle(
                           color: color.withValues(alpha: 0.75),
                           fontSize: 12,

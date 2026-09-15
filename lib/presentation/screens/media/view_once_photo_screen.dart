@@ -11,16 +11,20 @@ import '../../widgets/media/photo_canvas.dart';
 
 /// Download -> validate/decode -> atomically claim -> reveal.
 /// No disk cache, no thumbnail, no forwarding, and no claim on a failed load.
+/// If [ttlSeconds] is set (timed photo e.g. 10s), shows a countdown and
+/// auto-closes after the ttl expires.
 class ViewOncePhotoScreen extends StatefulWidget {
   final Future<Uint8List> Function() loadPhoto;
   final Future<DateTime> Function() consumePhoto;
   final ValueChanged<DateTime> onViewed;
+  final int? ttlSeconds;
 
   const ViewOncePhotoScreen({
     super.key,
     required this.loadPhoto,
     required this.consumePhoto,
     required this.onViewed,
+    this.ttlSeconds,
   });
 
   @override
@@ -35,6 +39,9 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
   bool _obscured = false;
   Future<void> Function()? _releasePrivacy;
   int _generation = 0;
+  Timer? _ttlTimer;
+  int _remaining = 0;
+  DateTime? _viewedAt;
 
   @override
   void initState() {
@@ -80,7 +87,14 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
         _photo = preparedImage;
         preparedImage = null;
         _loading = false;
+        _viewedAt = viewedAt;
+        if (widget.ttlSeconds != null && widget.ttlSeconds! > 0) {
+          _remaining = widget.ttlSeconds!;
+        }
       });
+      if (widget.ttlSeconds != null && widget.ttlSeconds! > 0) {
+        _startTtlCountdown();
+      }
     } catch (error) {
       if (!mounted || generation != _generation) return;
       setState(() {
@@ -94,8 +108,26 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
     }
   }
 
+  void _startTtlCountdown() {
+    _ttlTimer?.cancel();
+    _ttlTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted || _obscured) {
+        t.cancel();
+        return;
+      }
+      if (_remaining <= 1) {
+        t.cancel();
+        _obscure();
+        if (mounted) Navigator.of(context).pop();
+        return;
+      }
+      setState(() => _remaining--);
+    });
+  }
+
   void _obscure() {
     ++_generation;
+    _ttlTimer?.cancel();
     if (mounted) setState(() => _obscured = true);
   }
 
@@ -116,6 +148,7 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
   @override
   void dispose() {
     ++_generation;
+    _ttlTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     final photo = _photo;
     _photo = null;
@@ -205,6 +238,26 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
                 ),
               ),
             ),
+            if (widget.ttlSeconds != null && widget.ttlSeconds! > 0 && _photo != null && !_obscured)
+              Positioned(
+                top: 80,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(20)),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.timer, color: Colors.white, size: 18),
+                        const SizedBox(width: 6),
+                        Text('$_remaining ثانیه', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             Positioned(
               bottom: 0,
               left: 0,
@@ -215,7 +268,9 @@ class _ViewOncePhotoScreenState extends State<ViewOncePhotoScreen>
                   top: false,
                   minimum: const EdgeInsets.all(16),
                   child: Text(
-                    labels.disappears,
+                    widget.ttlSeconds != null && widget.ttlSeconds! > 0
+                        ? 'این عکس پس از $_remaining ثانیه به‌طور خودکار بسته می‌شود'
+                        : labels.disappears,
                     textAlign: TextAlign.center,
                     style: const TextStyle(color: Colors.white70, fontSize: 13),
                   ),

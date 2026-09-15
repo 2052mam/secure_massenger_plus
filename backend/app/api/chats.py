@@ -677,6 +677,18 @@ def delete_chat(chat_id):
             'deleted_at': datetime.utcnow(),
             'deleted_by': user_id,
         })
+        # Also delete the chat history for both parties simultaneously (Item 5)
+        from app.models.message import Message, PinnedMessage
+        Message.query.filter_by(chat_id=chat_id).update({
+            'is_deleted_for_all': True,
+            'is_deleted': True,
+            'deleted_at': datetime.utcnow(),
+            'deleted_by': user_id,
+        }, synchronize_session=False)
+        PinnedMessage.query.filter_by(chat_id=chat_id, is_deleted=False).update({
+            'is_deleted': True,
+            'deleted_at': datetime.utcnow(),
+        }, synchronize_session=False)
     else:
         member.is_deleted = True
         member.deleted_at = datetime.utcnow()

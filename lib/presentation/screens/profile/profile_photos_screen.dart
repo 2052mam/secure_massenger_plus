@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../../core/utils/media_utils.dart';
 import '../../../data/models/user_photo_model.dart';
+import '../../../data/services/media_download_service.dart';
 import '../../providers/auth_provider.dart';
 import '../../widgets/chat/chat_labels.dart';
 import '../../widgets/media/photo_canvas.dart';
@@ -136,12 +137,39 @@ class _ProfilePhotosScreenState extends ConsumerState<ProfilePhotosScreen> {
     );
   }
 
+  Future<void> _downloadCurrent() async {
+    if (urls.isEmpty) return;
+    final url = urls[_index < 0 || _index >= urls.length ? 0 : _index];
+    try {
+      final resolved = resolveMediaUrl(null, existingUrl: url) ?? url;
+      final file = await MediaDownloadService.downloadMedia(
+        url: resolved,
+        token: ref.read(authenticatedSessionProvider).token,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('ذخیره شد: ${file.path}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('خطا در دانلود: $e')),
+      );
+    }
+  }
+
+  List<String> get urls {
+    if (_photos.isEmpty && widget.initialUrl != null && _loading) {
+      return [widget.initialUrl!];
+    }
+    return _photos.map((p) => p.photoUrl).toList();
+  }
+
   @override
   Widget build(BuildContext context) {
     final labels = ChatLabels.of(context);
-    final urls = _photos.isEmpty && widget.initialUrl != null && _loading
-        ? [widget.initialUrl!]
-        : _photos.map((p) => p.photoUrl).toList();
+    // Use getter to avoid duplication; local shadows for build.
+    final buildUrls = urls;
     final canManage = widget.manage && _isSelf;
 
     return Scaffold(
@@ -150,11 +178,18 @@ class _ProfilePhotosScreenState extends ConsumerState<ProfilePhotosScreen> {
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         title: Text(
-          urls.length > 1
-              ? labels.photoCounter(_index + 1, urls.length)
+          buildUrls.length > 1
+              ? labels.photoCounter(_index + 1, buildUrls.length)
               : (widget.title ?? labels.profilePhotos),
         ),
         actions: [
+          if (buildUrls.isNotEmpty)
+            IconButton(
+              key: const ValueKey('download-profile-photo'),
+              tooltip: 'دانلود تصویر پروفایل',
+              icon: const Icon(Icons.download_outlined),
+              onPressed: _downloadCurrent,
+            ),
           if (canManage)
             IconButton(
               key: const ValueKey('add-profile-photo'),
@@ -185,7 +220,7 @@ class _ProfilePhotosScreenState extends ConsumerState<ProfilePhotosScreen> {
       ),
       body: Stack(
         children: [
-          if (urls.isEmpty)
+          if (buildUrls.isEmpty)
             Center(
               child: Text(
                 _error ?? labels.noPhotos,
@@ -195,10 +230,10 @@ class _ProfilePhotosScreenState extends ConsumerState<ProfilePhotosScreen> {
           else
             PageView.builder(
               controller: _controller,
-              itemCount: urls.length,
+              itemCount: buildUrls.length,
               onPageChanged: (i) => setState(() => _index = i),
               itemBuilder: (context, i) =>
-                  PhotoCanvas(key: ValueKey(urls[i]), image: _provider(urls[i])),
+                  PhotoCanvas(key: ValueKey(buildUrls[i]), image: _provider(buildUrls[i])),
             ),
           if (_busy || _loading)
             const Positioned(
@@ -207,7 +242,7 @@ class _ProfilePhotosScreenState extends ConsumerState<ProfilePhotosScreen> {
               right: 0,
               child: LinearProgressIndicator(minHeight: 2),
             ),
-          if (urls.length > 1)
+          if (buildUrls.length > 1)
             Positioned(
               bottom: 24,
               left: 0,
@@ -215,7 +250,7 @@ class _ProfilePhotosScreenState extends ConsumerState<ProfilePhotosScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  for (var i = 0; i < urls.length; i++)
+                  for (var i = 0; i < buildUrls.length; i++)
                     Container(
                       width: 7,
                       height: 7,

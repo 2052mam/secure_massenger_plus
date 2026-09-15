@@ -280,8 +280,11 @@ def _create_authenticated_session(
     user.is_online = True
     user.last_seen = datetime.utcnow()
 
-    access = create_access_token(identity=user.id, expires_delta=timedelta(hours=24))
-    refresh = create_refresh_token(identity=user.id, expires_delta=timedelta(days=30))
+    token_version = getattr(user, 'token_version', 0) or 0
+    access = create_access_token(identity=user.id, expires_delta=timedelta(hours=24),
+                                 additional_claims={'token_version': int(token_version)})
+    refresh = create_refresh_token(identity=user.id, expires_delta=timedelta(days=30),
+                                   additional_claims={'token_version': int(token_version)})
     db.session.add(UserSession(
         user_id=user.id,
         device_id=device.id,
@@ -747,5 +750,29 @@ def logout():
 @jwt_required(refresh=True)
 def refresh():
     user_id = get_jwt_identity()
-    access = create_access_token(identity=user_id, expires_delta=timedelta(hours=24))
+    from flask_jwt_extended import get_jwt
+    claims = get_jwt()
+    token_version = claims.get('token_version')
+    # If old refresh token had no version, use current user's version.
+    if token_version is None:
+        user = db.session.get(User, user_id)
+        token_version = getattr(user, 'token_version', 0) or 0
+    access = create_access_token(identity=user_id, expires_delta=timedelta(hours=24),
+                                 additional_claims={'token_version': int(token_version)})
     return jsonify({'access_token': access}), 200
+
+
+@auth_bp.route('/check-phone', methods=['POST'])
+def check_phone():
+    """Check if a mobile number is registered without sending a code.
+
+    Used by the login screen to redirect unregistered users to the
+    registration form instead of sending a spurious SMS (Item 7).
+    """
+    data = request.get_json(silent=True) or {}
+    mobile_number = normalize_mobile_number(data.get('mobile_number'))
+    if not mobile_number:
+        return jsonify({'error': 'شماره موبایل نامعتبر است'}), 400
+    user = User.query.filter_by(mobile_number=mobile_number, is_deleted=False, is_active=True).first()
+    exists = bool(user and user.mobile_verified_at)
+    return jsonify({'exists': exists, 'mobile_number': mobile_number}), 200

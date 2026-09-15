@@ -7,6 +7,7 @@ import '../../data/models/chat_folder_model.dart';
 import '../../data/models/chat_model.dart';
 import '../../data/services/api_service.dart';
 import '../../data/services/archive_lock_service.dart';
+import '../../data/services/notification_service.dart';
 import 'auth_provider.dart';
 
 /// The main (non archived) chat list plus the archive summary shown on top of
@@ -118,6 +119,8 @@ class ChatListNotifier extends StateNotifier<AsyncValue<ChatListState>> {
   final ArchiveLockService? _lock;
   Timer? _pollTimer;
   Future<void>? _loading;
+  Map<String, String?> _lastMessageIds = {};
+  Map<String, int> _lastUnread = {};
 
   Future<void> loadChats() {
     if (!mounted || !_enabled) return Future<void>.value();
@@ -134,7 +137,39 @@ class ChatListNotifier extends StateNotifier<AsyncValue<ChatListState>> {
         headers: _archived ? _lock?.headers : null,
       );
       if (!mounted) return;
-      state = AsyncValue.data(ChatListState.fromJson(res));
+      final newState = ChatListState.fromJson(res);
+      state = AsyncValue.data(newState);
+      // Item3: reliable background notifications (polling + local notification fallback for sanctioned networks)
+      // Compare previous lastMessage ids to detect new incoming messages.
+      if (!_archived) {
+        for (final chat in newState.chats) {
+          final prevId = _lastMessageIds[chat.id];
+          final curId = chat.lastMessage?.id ?? chat.lastMessageId;
+          final prevUnread = _lastUnread[chat.id] ?? 0;
+          final curUnread = chat.unreadCount;
+          if (curId != null && curId != prevId && curUnread > prevUnread) {
+            // New message arrived while we are polling; show local notification
+            final title = chat.displayTitle;
+            final body = chat.lastMessage?.content?.isNotEmpty == true
+                ? chat.lastMessage!.content!
+                : (chat.lastMessage?.messageType == 'image' ? '📷 عکس' : chat.lastMessage?.messageType == 'video' ? '🎥 ویدیو' : chat.lastMessage?.messageType == 'poll' ? '📊 نظرسنجی' : 'پیام جدید');
+            try {
+              await NotificationService.showNewMessage(
+                title: title,
+                body: body.length > 120 ? '${body.substring(0, 120)}…' : body,
+                payload: chat.id,
+                id: chat.id.hashCode & 0x7fffffff,
+              );
+            } catch (_) {}
+          }
+          _lastMessageIds[chat.id] = curId;
+          _lastUnread[chat.id] = curUnread;
+        }
+        // Cleanup removed chats
+        final ids = newState.chats.map((c) => c.id).toSet();
+        _lastMessageIds.removeWhere((k, _) => !ids.contains(k));
+        _lastUnread.removeWhere((k, _) => !ids.contains(k));
+      }
     } catch (error, stack) {
       if (!mounted) return;
       // A locked archive is a real error for the archive screen, but the main

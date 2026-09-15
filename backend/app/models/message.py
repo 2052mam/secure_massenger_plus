@@ -23,6 +23,10 @@ class Message(db.Model):
     # View Once
     is_view_once = db.Column(db.Boolean, default=False)
     viewed_at = db.Column(db.DateTime, nullable=True)
+    # Timed photo: view-once with explicit TTL in seconds (e.g., 10). NULL = indefinite until exit.
+    view_once_ttl = db.Column(db.Integer, nullable=True)
+    # Poll data (Telegram-like polls/quizzes stored as JSON on the message)
+    poll_json = db.Column(db.JSON, nullable=True)
 
     # Spoiler Mode
     is_spoiler = db.Column(db.Boolean, default=False, nullable=False)

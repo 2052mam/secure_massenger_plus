@@ -64,6 +64,7 @@ dependencies:
   timeago: ^3.7.0
   collection: ^1.19.0
   equatable: ^2.0.7
+  flutter_local_notifications: ^17.1.2
 
 dependency_overrides:
   # جلوگیری از تداخل record_linux با platform interface

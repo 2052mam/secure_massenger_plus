@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
+from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from app import db
 from app.models.user import User, UserDevice, UserSession
 from app.models.audit import AuditLog
@@ -16,23 +16,45 @@ def get_client_ip():
 @jwt_required()
 def list_devices():
     user_id = get_jwt_identity()
+    # Determine current device via header or most recent
+    current_fp = request.headers.get('X-Device-Fingerprint') or request.args.get('fingerprint')
     devices = UserDevice.query.filter_by(user_id=user_id, is_deleted=False).order_by(UserDevice.last_active.desc()).all()
     result = []
+    # Determine is_current: if fingerprint provided, match; else most recent is current
+    most_recent_id = devices[0].id if devices else None
     for d in devices:
-        # also fetch active sessions for device
         sessions = UserSession.query.filter_by(device_id=d.id, is_active=True).all()
+        # Device type inference
+        model_lower = (d.device_model or '').lower()
+        os_lower = (d.os_version or '').lower()
+        if 'android' in os_lower or 'phone' in model_lower:
+            device_type = 'mobile'
+        elif 'windows' in os_lower or 'mac' in os_lower or 'desktop' in os_lower:
+            device_type = 'desktop'
+        else:
+            device_type = 'unknown'
+        is_current = False
+        if current_fp:
+            is_current = d.device_fingerprint == current_fp
+        else:
+            is_current = d.id == most_recent_id
         result.append({
             'id': d.id,
             'device_fingerprint': d.device_fingerprint[:12] + '...',
-            'device_name': d.device_name,
+            'full_fingerprint': d.device_fingerprint,
+            'device_name': d.device_name or d.device_model or 'ناشناس',
             'device_model': d.device_model,
+            'device_type': device_type,
+            'os': d.os_version,
             'os_version': d.os_version,
             'app_version': d.app_version,
             'user_agent': d.user_agent,
-            'is_active': d.is_active,
+            'is_active': d.is_active and not d.is_deleted,
             'last_active': d.last_active.isoformat() + 'Z' if d.last_active else None,
+            'last_active_at': d.last_active.isoformat() + 'Z' if d.last_active else None,
             'created_at': d.created_at.isoformat() + 'Z' if d.created_at else None,
-            'is_current': False,  # will be determined by fingerprint match if needed
+            'ip_address': sessions[0].ip_address if sessions and sessions[0].ip_address else get_client_ip(),
+            'is_current': is_current,
             'sessions_count': len(sessions),
         })
     return jsonify({'devices': result, 'total': len(result)}), 200
@@ -51,6 +73,11 @@ def terminate_device(device_id):
     device.is_active = False
     # deactivate sessions
     UserSession.query.filter_by(device_id=device.id, is_active=True).update({'is_active': False}, synchronize_session=False)
+    # Increment token_version to instantly revoke JWTs for this device (stateless JWT invalidation)
+    user = db.session.get(User, user_id)
+    if user is not None:
+        current = getattr(user, 'token_version', 0) or 0
+        user.token_version = int(current) + 1
     db.session.add(AuditLog(actor_id=user_id, action='terminate_device', entity_type='device', entity_id=device_id, ip_address=get_client_ip()))
     db.session.commit()
     return jsonify({'ok': True, 'message': 'دستگاه حذف شد'}), 200
@@ -60,8 +87,8 @@ def terminate_device(device_id):
 @jwt_required()
 def terminate_others():
     user_id = get_jwt_identity()
-    data = request.get_json() or {}
-    keep_fingerprint = data.get('current_fingerprint')  # optional
+    data = request.get_json(silent=True) or {}
+    keep_fingerprint = data.get('current_fingerprint') or request.headers.get('X-Device-Fingerprint')
     # For now terminate all except most recent active
     devices = UserDevice.query.filter_by(user_id=user_id, is_deleted=False).all()
     # keep current device: if fingerprint provided, keep that; else keep most recent
@@ -85,6 +112,12 @@ def terminate_others():
         d.is_active = False
         UserSession.query.filter_by(device_id=d.id, is_active=True).update({'is_active': False}, synchronize_session=False)
         terminated += 1
+    if terminated > 0:
+        user = db.session.get(User, user_id)
+        if user is not None:
+            current = getattr(user, 'token_version', 0) or 0
+            # Increment by number of terminated devices to ensure revocation
+            user.token_version = int(current) + 1
     db.session.add(AuditLog(actor_id=user_id, action='terminate_other_devices', entity_type='user', entity_id=user_id, ip_address=get_client_ip()))
     db.session.commit()
     return jsonify({'ok': True, 'terminated': terminated}), 200
@@ -133,19 +166,21 @@ def notifications():
     user_id = get_jwt_identity()
     # Check for recent new device logins (last 7 days) and produce warning
     # Also check if user is limited
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id) if hasattr(db.session, 'get') else User.query.get(user_id)
     notifications = []
-    if user and user.is_limited:
+    if user and getattr(user, 'is_limited', False):
+        limited_until = getattr(user, 'limited_until', None)
+        until_str = limited_until.strftime("%Y/%m/%d") if limited_until else "نامشخص"
         notifications.append({
             'type': 'limited',
             'title': 'حساب محدود شده',
-            'message': f'حساب شما به دلیل "{user.limited_reason}" محدود شده تا {user.limited_until.strftime("%Y/%m/%d")} - فقط می‌توانید به چت‌های موجود پاسخ دهید.',
+            'message': f'حساب شما به دلیل "{getattr(user, "limited_reason", "")}" محدود شده تا {until_str} - فقط می‌توانید به چت‌های موجود پاسخ دهید.',
             'severity': 'warning',
         })
     # New device warning: if last login was from new fingerprint within 24h
     from datetime import timedelta
     recent = datetime.utcnow() - timedelta(hours=24)
-    recent_logins = AuditLog.query.filter(AuditLog.actor_id==user_id, AuditLog.action=='user_login', AuditLog.created_at >= recent).order_by(AuditLog.created_at.desc()).all()
+    recent_logins = AuditLog.query.filter(AuditLog.actor_id==user_id, AuditLog.action.in_(['user_login','phone_login','phone_login_2fa','user_register_login']), AuditLog.created_at >= recent).order_by(AuditLog.created_at.desc()).all()
     # If more than 1 distinct fingerprint in 24h, warn
     fingerprints = set(l.device_fingerprint for l in recent_logins if l.device_fingerprint)
     if len(fingerprints) > 1:
@@ -160,10 +195,8 @@ def notifications():
     # Also check for any new device in last login
     if recent_logins:
         latest = recent_logins[0]
-        # Check if its device fingerprint is new (first time seen >1 device)
         total_devices = UserDevice.query.filter_by(user_id=user_id, is_deleted=False).count()
         if total_devices > 1:
-            # Add generic login notification if not already added
             if not any(n['type']=='new_login' for n in notifications):
                 notifications.append({
                     'type': 'login',

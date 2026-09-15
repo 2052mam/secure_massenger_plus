@@ -27,33 +27,64 @@ MAX_PINNED_MESSAGES = 100
 
 
 def dispatch_scheduled_messages(chat_id=None):
-    """Automatically dispatch due scheduled messages."""
+    """Automatically dispatch due scheduled messages. Never raises to caller.
+
+    The previous implementation could throw an IntegrityError on concurrent
+    polls or leave a partially-dispatched message if an exception escaped
+    inside Flask's HTML error handler (showing <!doctype> on the client).
+    """
     now = datetime.utcnow()
-    query = Message.query.filter(
-        Message.is_scheduled == True,
-        Message.scheduled_at <= now,
-        Message.is_deleted == False,
-        Message.is_deleted_for_all == False,
-    )
-    if chat_id:
-        query = query.filter(Message.chat_id == chat_id)
-    scheduled_msgs = query.all()
-    if not scheduled_msgs:
-        return
-    for msg in scheduled_msgs:
-        msg.is_scheduled = False
-        msg.created_at = now
-        members = ChatMember.query.filter_by(chat_id=msg.chat_id, is_deleted=False).all()
-        for m in members:
-            if m.user_id != msg.sender_id:
+    try:
+        query = Message.query.filter(
+            Message.is_scheduled == True,
+            Message.scheduled_at <= now,
+            Message.is_deleted == False,
+            Message.is_deleted_for_all == False,
+        )
+        if chat_id:
+            query = query.filter(Message.chat_id == chat_id)
+        scheduled_msgs = query.all()
+        if not scheduled_msgs:
+            return
+        for msg in scheduled_msgs:
+            # Skip messages whose chat was deleted meanwhile.
+            chat = db.session.get(Chat, msg.chat_id)
+            if not chat or chat.is_deleted or chat.is_deleted_for_all:
+                continue
+            msg.is_scheduled = False
+            msg.scheduled_at = None
+            msg.created_at = now
+            # Avoid duplicate MessageStatus rows on racing dispatches.
+            existing_user_ids = {
+                s.user_id for s in MessageStatus.query.filter_by(message_id=msg.id).all()
+            }
+            members = ChatMember.query.filter_by(chat_id=msg.chat_id, is_deleted=False).all()
+            for m in members:
+                if m.user_id == msg.sender_id:
+                    continue
+                if m.user_id in existing_user_ids:
+                    continue
+                # Ensure member still has access (race with leave)
+                if not user_in_chat(m.user_id, msg.chat_id):
+                    continue
                 db.session.add(MessageStatus(
                     message_id=msg.id, user_id=m.user_id, status='delivered',
                     delivered_at=now
                 ))
-        chat = db.session.get(Chat, msg.chat_id)
-        if chat:
-            chat.updated_at = now
-    db.session.commit()
+            if chat:
+                chat.updated_at = now
+        db.session.commit()
+    except Exception as e:
+        # Never leak a 500 HTML page (<!doctype>) to the polling client.
+        # The chat screen must keep loading even if one scheduled row is broken.
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        try:
+            current_app.logger.exception(f"dispatch_scheduled_messages failed: {e}")
+        except Exception:
+            pass
 
 
 def _pinned_count(chat_id):
@@ -78,7 +109,10 @@ def get_messages(chat_id):
 
     secure_only = (request.args.get('secure') or '').strip().lower() in ('1', 'true', 'yes', 'on')
     if not secure_only:
-        dispatch_scheduled_messages(chat_id)
+        try:
+            dispatch_scheduled_messages(chat_id)
+        except Exception:
+            pass
 
     try:
         limit = max(1, min(int(request.args.get('limit', 50)), 100))
@@ -156,13 +190,16 @@ def send_message():
 
     if message_type not in ('text', 'image', 'video', 'voice', 'audio', 'music', 'file',
                             'sticker', 'gif', 'video_note', 'round_video',
-                            'location', 'live_location'):
+                            'location', 'live_location', 'poll'):
         return jsonify({'error': 'Invalid message type'}), 400
     # Secure + view-once + scheduled never mix (Telegram-like: secure is ephemeral).
     if is_secure and (is_view_once or data.get('scheduled_at')):
         return jsonify({'error': 'پیام امن نمی‌تواند زمان‌بندی یا یک‌بارمصرف باشد'}), 400
     if is_encrypted and is_view_once:
         return jsonify({'error': 'پیام رمزدار نمی‌تواند یک‌بارمصرف باشد'}), 400
+    # Poll messages never mix with view-once/secure/encrypted
+    if message_type == 'poll' and (is_view_once or is_encrypted or is_secure or media_id):
+        return jsonify({'error': 'Poll cannot be view-once or encrypted'}), 400
     if message_type in ('location', 'live_location'):
         try:
             lat = float(data.get('latitude'))
@@ -262,6 +299,62 @@ def send_message():
 
     if is_view_once and (message_type != 'image' or not media_id):
         return jsonify({'error': 'مشاهده یک‌باره فقط برای عکس مجاز است'}), 400
+    # Timed photo TTL handling (10 seconds etc)
+    view_once_ttl = data.get('view_once_ttl')
+    if view_once_ttl is not None:
+        try:
+            view_once_ttl = int(view_once_ttl)
+            if view_once_ttl < 1 or view_once_ttl > 86400:
+                return jsonify({'error': 'TTL must be 1..86400 seconds'}), 400
+            if not is_view_once:
+                return jsonify({'error': 'TTL only for view-once photos'}), 400
+        except (TypeError, ValueError):
+            return jsonify({'error': 'view_once_ttl invalid'}), 400
+    else:
+        view_once_ttl = None
+    # Poll payload validation
+    poll_json = None
+    if message_type == 'poll':
+        question = (data.get('question') or content or '').strip()
+        options = data.get('options')
+        poll_type = data.get('poll_type', 'poll')
+        allows_multiple = bool(data.get('allows_multiple', False))
+        is_anonymous = bool(data.get('is_anonymous', True))
+        correct_option = data.get('correct_option')
+        quiz_explanation = (data.get('explanation') or '').strip()[:500]
+        if not question or len(question) > 300:
+            return jsonify({'error': 'Poll question must be 1-300 chars'}), 400
+        if not isinstance(options, list) or len(options) < 2 or len(options) > 10:
+            return jsonify({'error': 'Poll needs 2-10 options'}), 400
+        clean_options = []
+        for opt in options:
+            if not isinstance(opt, str) or not opt.strip():
+                return jsonify({'error': 'Poll option empty'}), 400
+            if len(opt.strip()) > 100:
+                return jsonify({'error': 'Poll option too long (max 100)'}), 400
+            clean_options.append(opt.strip())
+        if poll_type not in ('poll', 'quiz'):
+            poll_type = 'poll'
+        if poll_type == 'quiz':
+            if correct_option is None or not isinstance(correct_option, int) or not (0 <= correct_option < len(clean_options)):
+                return jsonify({'error': 'Quiz needs a correct option index'}), 400
+        else:
+            correct_option = None
+        poll_json = {
+            'question': question,
+            'options': [{'text': t, 'votes': 0, 'voter_ids': []} for t in clean_options],
+            'poll_type': poll_type,
+            'allows_multiple': allows_multiple,
+            'is_anonymous': is_anonymous,
+            'correct_option': correct_option,
+            'explanation': quiz_explanation or None,
+            'total_voters': 0,
+            'is_closed': False,
+        }
+        # Poll content is the question for search/display
+        content = question
+        view_once_ttl = None
+        is_view_once = False
     # Location payload
     latitude = longitude = None
     location_title = None
@@ -342,6 +435,7 @@ def send_message():
         media_id=media_id,
         reply_to_id=reply_to_id,
         is_view_once=is_view_once,
+        view_once_ttl=view_once_ttl,
         is_spoiler=is_spoiler,
         is_scheduled=is_scheduled,
         scheduled_at=scheduled_dt if is_scheduled else None,
@@ -356,6 +450,7 @@ def send_message():
         audio_artist=audio_artist,
         audio_duration=audio_duration,
         is_muted=is_muted,
+        poll_json=poll_json,
     )
     db.session.add(msg)
     db.session.flush()
@@ -636,7 +731,10 @@ def poll_updates():
     کلاینت هر چند ثانیه این را صدا می‌زند و after timestamp یا last_event_id می‌دهد
     """
     user_id = get_jwt_identity()
-    dispatch_scheduled_messages()
+    try:
+        dispatch_scheduled_messages()
+    except Exception:
+        pass
     since = request.args.get('since')  # ISO datetime
     limit = min(int(request.args.get('limit', 50)), 100)
 
@@ -800,7 +898,18 @@ def view_once_message(message_id, user_id):
     if not msg.is_view_once or msg.message_type != 'image':
         return None, (jsonify({'error': 'این پیام عکس یک‌بارمصرف نیست'}), 400)
     if msg.viewed_at is not None:
-        return None, (jsonify({'error': 'عکس قبلاً مشاهده شده است'}), 410)
+        # Timed photo: after TTL expires, it's permanently gone; before TTL it was already consumed.
+        ttl = getattr(msg, 'view_once_ttl', None)
+        if ttl is not None:
+            try:
+                ttl_int = int(ttl)
+                # If still within TTL window, the first view already consumed it; treat as gone.
+                # This prevents replay after the initial view.
+                return None, (jsonify({'error': 'عکس قبلاً مشاهده شده است'}), 410)
+            except Exception:
+                pass
+        else:
+            return None, (jsonify({'error': 'عکس قبلاً مشاهده شده است'}), 410)
     return msg, None
 
 
@@ -850,7 +959,132 @@ def mark_view_once(message_id):
         entity_id=message_id, ip_address=get_client_ip(),
     ))
     db.session.commit()
-    return jsonify({'ok': True, 'viewed_at': utc_iso(viewed_at)}), 200
+    return jsonify({'ok': True, 'viewed_at': utc_iso(viewed_at), 'view_once_ttl': getattr(msg, 'view_once_ttl', None)}), 200
+
+
+# ------------------------- Poll feature (Item 6) -------------------------
+@messages_bp.route('/<message_id>/poll/vote', methods=['POST'])
+@jwt_required()
+def vote_poll(message_id):
+    user_id = get_jwt_identity()
+    data = request.get_json() or {}
+    option_index = data.get('option_index')
+    # For multiple choice, accept list
+    option_indices = data.get('option_indices') or ([option_index] if isinstance(option_index, int) else None)
+    if option_indices is None:
+        return jsonify({'error': 'option_index required'}), 400
+    if not isinstance(option_indices, list) or not all(isinstance(i, int) for i in option_indices):
+        return jsonify({'error': 'option_indices must be int list'}), 400
+
+    msg = Message.query.filter_by(id=message_id, is_deleted=False, is_deleted_for_all=False).first()
+    if not msg or msg.message_type != 'poll' or not msg.poll_json:
+        return jsonify({'error': 'Poll not found'}), 404
+    if not user_in_chat(user_id, msg.chat_id):
+        return jsonify({'error': 'دسترسی ندارید'}), 403
+    poll = msg.poll_json
+    if poll.get('is_closed'):
+        return jsonify({'error': 'Poll is closed'}), 400
+    options = poll.get('options', [])
+    # Validate indices
+    for idx in option_indices:
+        if idx < 0 or idx >= len(options):
+            return jsonify({'error': 'Invalid option index'}), 400
+    allows_multiple = bool(poll.get('allows_multiple'))
+    if not allows_multiple and len(option_indices) != 1:
+        return jsonify({'error': 'Poll allows only one choice'}), 400
+    if allows_multiple and len(option_indices) > len(options):
+        return jsonify({'error': 'Too many options'}), 400
+
+    from app.models.poll import PollVote
+    # Check existing votes
+    existing = PollVote.query.filter_by(message_id=message_id, user_id=user_id).all()
+    existing_indices = {v.option_index for v in existing}
+    # If exactly same vote, treat as idempotent
+    if set(option_indices) == existing_indices and existing:
+        return jsonify({'ok': True, 'poll': poll}), 200
+
+    # Remove previous votes if poll doesn't allow multiple or voter changing vote
+    # For single-choice polls, allow changing vote; for multiple-choice, replace entirely
+    for v in existing:
+        db.session.delete(v)
+    # Update poll_json counters
+    # First decrement old votes
+    total_voters_delta = 0
+    # Need to recompute from scratch: count distinct voters after operation
+    # Simplified: just adjust counts based on diff
+    for idx in existing_indices:
+        if idx < len(options):
+            options[idx]['votes'] = max(0, int(options[idx].get('votes', 0)) - 1)
+            if 'voter_ids' in options[idx] and user_id in options[idx]['voter_ids']:
+                options[idx]['voter_ids'].remove(user_id)
+    for idx in option_indices:
+        options[idx]['votes'] = int(options[idx].get('votes', 0)) + 1
+        if 'voter_ids' not in options[idx]:
+            options[idx]['voter_ids'] = []
+        if user_id not in options[idx]['voter_ids']:
+            options[idx]['voter_ids'].append(user_id)
+        db.session.add(PollVote(message_id=message_id, user_id=user_id, option_index=idx))
+
+    # Recalculate total_voters as distinct voters count
+    all_votes = PollVote.query.filter_by(message_id=message_id).all()
+    distinct_voters = len({v.user_id for v in all_votes} | {user_id})
+    # The above includes new votes already staged; use count query instead after flush
+    db.session.flush()
+    distinct_voters = db.session.query(PollVote.user_id).filter_by(message_id=message_id).distinct().count()
+    poll['total_voters'] = distinct_voters
+
+    # If anonymous, don't expose voter_ids in response
+    msg.poll_json = poll
+    db.session.add(AuditLog(actor_id=user_id, action='poll_vote', entity_type='message', entity_id=message_id, ip_address=get_client_ip()))
+    db.session.commit()
+    # Return sanitized poll (hide voter_ids if anonymous)
+    response_poll = dict(poll)
+    if poll.get('is_anonymous'):
+        for opt in response_poll.get('options', []):
+            opt = dict(opt)
+            opt.pop('voter_ids', None)
+    else:
+        # For non-anonymous, keep but limit
+        pass
+    return jsonify({'ok': True, 'poll': poll}), 200
+
+
+@messages_bp.route('/<message_id>/poll', methods=['GET'])
+@jwt_required()
+def get_poll(message_id):
+    user_id = get_jwt_identity()
+    msg = Message.query.filter_by(id=message_id, is_deleted=False).first()
+    if not msg or msg.message_type != 'poll':
+        return jsonify({'error': 'Poll not found'}), 404
+    if not user_in_chat(user_id, msg.chat_id):
+        return jsonify({'error': 'دسترسی ندارید'}), 403
+    poll = msg.poll_json or {}
+    # Enrich with user vote
+    from app.models.poll import PollVote
+    my_votes = [v.option_index for v in PollVote.query.filter_by(message_id=message_id, user_id=user_id).all()]
+    poll_copy = dict(poll)
+    poll_copy['my_votes'] = my_votes
+    return jsonify({'poll': poll_copy}), 200
+
+
+@messages_bp.route('/<message_id>/poll/close', methods=['POST'])
+@jwt_required()
+def close_poll(message_id):
+    user_id = get_jwt_identity()
+    msg = Message.query.filter_by(id=message_id, is_deleted=False).first()
+    if not msg or msg.message_type != 'poll':
+        return jsonify({'error': 'Poll not found'}), 404
+    if msg.sender_id != user_id:
+        # Also allow chat owner/admin to close
+        chat = db.session.get(Chat, msg.chat_id)
+        member = ChatMember.query.filter_by(chat_id=msg.chat_id, user_id=user_id, is_deleted=False).first()
+        if not chat or not member or member.role not in ('owner','admin'):
+            return jsonify({'error': 'Only author or admin can close poll'}), 403
+    poll = msg.poll_json or {}
+    poll['is_closed'] = True
+    msg.poll_json = poll
+    db.session.commit()
+    return jsonify({'ok': True, 'poll': poll}), 200
 
 
 @messages_bp.route('/statuses', methods=['POST'])

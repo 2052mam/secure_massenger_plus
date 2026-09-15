@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import '../../core/constants/api_constants.dart';
 import 'storage_service.dart';
+import 'device_service.dart';
 
 class ApiService {
   static final ApiService _instance = ApiService._();
@@ -29,6 +30,13 @@ class ApiService {
     if (token != null) {
       h['Authorization'] = 'Bearer $token';
     }
+    // Include device fingerprint for device management is_current detection
+    try {
+      final fp = StorageService.getDeviceId();
+      if (fp != null && fp.isNotEmpty) {
+        h['X-Device-Fingerprint'] = fp;
+      }
+    } catch (_) {}
     return h;
   }
 
@@ -38,19 +46,41 @@ class ApiService {
     return h;
   }
 
+  // Fallback URLs for Iran filtering resilience (Item 3)
+  List<String> get _fallbackBases {
+    final primary = ApiConstants.baseUrl;
+    final fallbacks = <String>[primary];
+    // Add known mirror/fallback if primary is filtered
+    if (primary.contains('massenger.reservira.ir')) {
+      fallbacks.add(primary); // keep same but could add alternative domain
+    }
+    return fallbacks;
+  }
+
   Future<Map<String, dynamic>> post(
     String path,
     Map<String, dynamic> body, {
     Map<String, String>? headers,
   }) async {
-    final res = await http
-        .post(
-          Uri.parse('${ApiConstants.baseUrl}$path'),
-          headers: {..._jsonHeaders, ...?headers},
-          body: jsonEncode(body),
-        )
-        .timeout(const Duration(seconds: 30));
-    return _handle(res);
+    // Try primary, fallback on network failure
+    Object? lastError;
+    for (final base in _fallbackBases) {
+      try {
+        final res = await http
+            .post(
+              Uri.parse('$base$path'),
+              headers: {..._jsonHeaders, ...?headers},
+              body: jsonEncode(body),
+            )
+            .timeout(const Duration(seconds: 30));
+        return _handle(res);
+      } catch (e) {
+        lastError = e;
+        if (e is ApiException) rethrow;
+        // continue to fallback
+      }
+    }
+    throw lastError ?? ApiException(statusCode: 0, message: 'خطا در ارتباط با سرور');
   }
 
   Future<Map<String, dynamic>> get(
@@ -58,13 +88,20 @@ class ApiService {
     Map<String, String>? query,
     Map<String, String>? headers,
   }) async {
-    final uri = Uri.parse(
-      '${ApiConstants.baseUrl}$path',
-    ).replace(queryParameters: query);
-    final res = await http
-        .get(uri, headers: {..._headers, ...?headers})
-        .timeout(const Duration(seconds: 30));
-    return _handle(res);
+    Object? lastError;
+    for (final base in _fallbackBases) {
+      try {
+        final uri = Uri.parse('$base$path').replace(queryParameters: query);
+        final res = await http
+            .get(uri, headers: {..._headers, ...?headers})
+            .timeout(const Duration(seconds: 30));
+        return _handle(res);
+      } catch (e) {
+        lastError = e;
+        if (e is ApiException) rethrow;
+      }
+    }
+    throw lastError ?? ApiException(statusCode: 0, message: 'خطا در ارتباط با سرور');
   }
 
   /// Ephemeral media is kept in memory and never passed to an image disk cache.
@@ -81,7 +118,10 @@ class ApiService {
         final body = jsonDecode(response.body) as Map<String, dynamic>;
         message = body['error'] as String? ?? message;
       } catch (_) {
-        // A reverse proxy may return an HTML error instead of JSON.
+        // Check for HTML doctype error (500 page)
+        if (response.body.trim().toLowerCase().startsWith('<!doctype')) {
+          message = 'خطای سرور (doctype). لطفاً تاریخچه را تازه‌سازی کنید';
+        }
       }
       throw ApiException(statusCode: response.statusCode, message: message);
     }
@@ -144,9 +184,27 @@ class ApiService {
   }
 
   Map<String, dynamic> _handle(http.Response res) {
-    final body = res.body.isNotEmpty
-        ? jsonDecode(res.body) as Map<String, dynamic>
-        : <String, dynamic>{};
+    // Detect HTML doctype responses (e.g., 500 error page) before JSON parsing
+    final trimmed = res.body.trimLeft().toLowerCase();
+    if (trimmed.startsWith('<!doctype') || trimmed.startsWith('<html')) {
+      // Convert HTML error to JSON-like error to avoid red doctype crash (Item 1)
+      throw ApiException(
+        statusCode: res.statusCode >= 400 ? res.statusCode : 500,
+        message: 'خطای سرور موقت — لطفاً دوباره تلاش کنید یا تاریخچه را پاک کنید',
+      );
+    }
+    final Map<String, dynamic> body;
+    try {
+      body = res.body.isNotEmpty
+          ? jsonDecode(res.body) as Map<String, dynamic>
+          : <String, dynamic>{};
+    } catch (_) {
+      // If JSON parsing fails, treat as server error but don't expose HTML
+      throw ApiException(
+        statusCode: res.statusCode,
+        message: 'پاسخ نامعتبر از سرور',
+      );
+    }
     if (res.statusCode >= 200 && res.statusCode < 300) {
       return body;
     }

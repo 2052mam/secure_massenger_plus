@@ -11,7 +11,8 @@ import '../../widgets/chat/terms_dialog.dart';
 import 'phone_verification_screen.dart';
 
 class RegisterScreen extends ConsumerStatefulWidget {
-  const RegisterScreen({super.key});
+  final String? initialMobile;
+  const RegisterScreen({super.key, this.initialMobile});
 
   @override
   ConsumerState<RegisterScreen> createState() => _RegisterScreenState();
@@ -28,6 +29,14 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   bool _obscure = true;
   String? _error;
   bool _termsAccepted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initialMobile != null && widget.initialMobile!.isNotEmpty) {
+      _mobileCtrl.text = widget.initialMobile!;
+    }
+  }
 
   @override
   void dispose() {

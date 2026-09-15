@@ -60,6 +60,10 @@ class User(db.Model):
     limited_reason = db.Column(db.Text, nullable=True)
     limited_by = db.Column(db.String(36), nullable=True)
 
+    # Token revocation version: incremented when any device is terminated
+    # to instantly invalidate JWTs issued before the revocation.
+    token_version = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+
     # Soft Delete
     is_deleted = db.Column(db.Boolean, default=False, index=True)
     deleted_at = db.Column(db.DateTime, nullable=True)

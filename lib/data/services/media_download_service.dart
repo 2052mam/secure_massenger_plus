@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import '../../core/constants/api_constants.dart';
+import 'media_cache_service.dart';
 import 'storage_service.dart';
 
 class MediaDownloadService {
@@ -12,13 +13,40 @@ class MediaDownloadService {
     required String fileName,
     String? token,
     Function(int received, int total)? onProgress,
+    String? messageId,
   }) async {
     try {
+      // Item10: if server wiped, serve from internal cache
+      if (messageId != null) {
+        final cached = MediaCacheService.getCachedFileForMessage(messageId);
+        if (cached != null) {
+          Directory? dir;
+          try {
+            dir = await getDownloadsDirectory();
+          } catch (_) {}
+          dir ??= await getApplicationDocumentsDirectory();
+          final dest = File('${dir.path}/$fileName');
+          await cached.copy(dest.path);
+          return dest.path;
+        }
+      } else {
+        final cachedUrl = MediaCacheService.getCachedFileForUrl(mediaUrl);
+        if (cachedUrl != null) {
+          Directory? dir;
+          try {
+            dir = await getDownloadsDirectory();
+          } catch (_) {}
+          dir ??= await getApplicationDocumentsDirectory();
+          final dest = File('${dir.path}/$fileName');
+          await cachedUrl.copy(dest.path);
+          return dest.path;
+        }
+      }
       final authToken = token ?? StorageService.getToken();
       final fullUrl = mediaUrl.startsWith('http')
           ? mediaUrl
           : '${ApiConstants.baseUrl}${mediaUrl.startsWith('/') ? '' : '/'}$mediaUrl';
-      
+
       final uri = Uri.parse(fullUrl).replace(queryParameters: {'download': '1'});
 
       final request = http.Request('GET', uri);
@@ -28,6 +56,20 @@ class MediaDownloadService {
 
       final response = await http.Client().send(request);
       if (response.statusCode < 200 || response.statusCode >= 300) {
+        // Fallback to internal cache on 404/410 after wipe
+        final fb = messageId != null
+            ? MediaCacheService.getCachedFileForMessage(messageId)
+            : MediaCacheService.getCachedFileForUrl(mediaUrl);
+        if (fb != null) {
+          Directory? dir;
+          try {
+            dir = await getDownloadsDirectory();
+          } catch (_) {}
+          dir ??= await getApplicationDocumentsDirectory();
+          final dest = File('${dir.path}/$fileName');
+          await fb.copy(dest.path);
+          return dest.path;
+        }
         throw Exception('Download failed with status ${response.statusCode}');
       }
 

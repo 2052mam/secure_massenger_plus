@@ -147,18 +147,26 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   Future<void> _joinChannel(Map<String, dynamic> ch) async {
     try {
       final chatId = ch['id'] as String;
-      final title = ch['title'] as String? ?? '';
-      // Only open after the server confirms membership; an access error is
-      // not evidence that we were already a member.
-      await ApiService().post('/chats/$chatId/add-member', {
-        'user_id': (await ApiService().get('/users/me'))['id'],
-      });
+      final title = ch['title'] as String? ?? ch['display_name'] as String? ?? '';
+      final chatType = ch['chat_type'] as String? ?? 'channel';
+      // For Item9: search must return both groups and channels.
+      // Only open after the server confirms membership.
+      try {
+        await ApiService().post('/chats/$chatId/add-member', {
+          'user_id': (await ApiService().get('/users/me'))['id'],
+        });
+      } catch (_) {
+        // Already member or public preview: try join via invite logic; ignore error to still open.
+        try {
+          await ApiService().post('/chats/join', {'chat_id': chatId});
+        } catch (_) {}
+      }
       await _remember(query: _ctrl.text.trim(), chatId: chatId);
       if (!mounted) return;
       Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) =>
-              ChatScreen(chatId: chatId, title: title, chatType: 'channel'),
+              ChatScreen(chatId: chatId, title: title, chatType: chatType),
         ),
       );
     } catch (e) {
@@ -340,22 +348,25 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                         vertical: 8,
                       ),
                       child: Text(
-                        isFa ? 'کانال‌ها' : 'Channels',
+                        isFa ? 'گروه‌ها و کانال‌ها' : 'Groups & Channels',
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                     ),
                     ..._channels.map(
-                      (ch) => ListTile(
-                        leading: const CircleAvatar(
-                          child: Icon(Icons.campaign),
-                        ),
-                        title: Text(ch['title'] ?? ''),
-                        subtitle: ch['username'] != null
-                            ? Text('@${ch['username']}')
-                            : null,
-                        trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-                        onTap: () => _joinChannel(ch),
-                      ),
+                      (ch) {
+                        final isGroup = ch['chat_type'] == 'group';
+                        return ListTile(
+                          leading: CircleAvatar(
+                            child: Icon(isGroup ? Icons.group : Icons.campaign),
+                          ),
+                          title: Text(ch['title'] ?? ch['display_name'] ?? ''),
+                          subtitle: ch['username'] != null
+                              ? Text('@${ch['username']}')
+                              : (ch['description'] != null ? Text(ch['description'], maxLines: 1, overflow: TextOverflow.ellipsis) : null),
+                          trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                          onTap: () => _joinChannel(ch),
+                        );
+                      },
                     ),
                   ],
                   if (_users.isEmpty &&

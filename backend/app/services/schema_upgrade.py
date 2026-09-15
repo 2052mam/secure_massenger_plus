@@ -23,6 +23,7 @@ def upgrade_schema():
             'allow_forwarding': 'BOOLEAN NOT NULL DEFAULT 1',
             'terms_version': 'INTEGER NOT NULL DEFAULT 0',
             'terms_accepted_at': 'DATETIME NULL',
+            'token_version': 'INTEGER NOT NULL DEFAULT 0',
         },
         'chats': {
             'permissions': 'JSON NULL',
@@ -60,6 +61,8 @@ def upgrade_schema():
             'audio_title': 'VARCHAR(200) NULL',
             'audio_artist': 'VARCHAR(200) NULL',
             'audio_duration': 'FLOAT NULL',
+            'view_once_ttl': 'INTEGER NULL',
+            'poll_json': 'JSON NULL',
         },
         'media_files': {
             'title': 'VARCHAR(200) NULL',
@@ -99,6 +102,7 @@ def upgrade_schema():
     from app.models.message import MessageReaction  # ensure exists
     from app.models.story import Story, StoryView  # noqa: F401
     from app.models.user import PhoneVerification  # noqa: F401
+    from app.models.poll import PollVote  # noqa: F401
 
     db.metadata.create_all(bind=db.engine)
     # Also ensure specific tables exist individually for older SQLAlchemy metadata
@@ -108,4 +112,5 @@ def upgrade_schema():
         Report.__table__, StickerPack.__table__, Sticker.__table__, SavedGif.__table__,
         MessageReaction.__table__,
         Story.__table__, StoryView.__table__, PhoneVerification.__table__,
+        PollVote.__table__,
     ])

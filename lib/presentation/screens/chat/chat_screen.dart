@@ -23,11 +23,13 @@ import '../../../data/services/api_service.dart';
 import '../../../data/services/storage_service.dart';
 import '../../../data/services/voice_service.dart';
 import '../../../data/services/location_service.dart';
+import '../../../data/services/media_cache_service.dart';
 import '../../../core/constants/api_constants.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_list_provider.dart';
 import '../profile/user_profile_screen.dart';
 import '../../widgets/chat/message_bubble.dart';
+import '../../widgets/chat/poll_create_sheet.dart';
 import '../../widgets/chat/chat_header.dart';
 import '../../widgets/chat/chat_labels.dart';
 import '../../widgets/chat/chat_invite_dialog.dart';
@@ -349,6 +351,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         _loading = false;
       });
       unawaited(_refreshMessageStatuses());
+      // Item10: persistent internal cache for received media (survives server wipe)
+      MediaCacheService.cacheMessagesInBackground(list, token: _authToken);
       if (query == null) {
         _scrollToBottom();
         _markChatRead();
@@ -407,10 +411,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       final list = (res['messages'] as List? ?? []).map(
         (e) => MessageModel.fromJson(e as Map<String, dynamic>),
       );
+      final typedList = list.toList();
       setState(() {
-        _mergeMessages(list);
+        _mergeMessages(typedList);
         _hasEarlier = res['has_more'] == true;
       });
+      MediaCacheService.cacheMessagesInBackground(typedList, token: _authToken);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted ||
             !_scrollCtrl.hasClients ||
@@ -710,6 +716,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             !_scrollCtrl.hasClients ||
             _scrollCtrl.position.maxScrollExtent - _scrollCtrl.offset < 160;
         setState(() => _mergeMessages(list));
+        MediaCacheService.cacheMessagesInBackground(list, token: _authToken);
         if (atBottom) _scrollToBottom();
         _markChatRead();
       }
@@ -983,6 +990,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
 
     bool sendViewOnce = viewOnce;
+    int? sendViewOnceTtl;
     bool sendSpoiler = _isSpoiler;
     if (!isVideo) {
       final choice = await showModalBottomSheet<String>(
@@ -1009,6 +1017,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                   subtitle: Text(MediaLabels.of(ctx).disappears),
                   onTap: () => Navigator.pop(ctx, 'once'),
                 ),
+              if (_can('send_view_once_photos'))
+                ListTile(
+                  leading: const Icon(Icons.timer_outlined, color: Colors.red),
+                  title: const Text('عکس زمان‌دار (مثل تلگرام)'),
+                  subtitle: const Text('پس از مشاهده خودکار حذف — ۱۰ ثانیه ...'),
+                  onTap: () => Navigator.pop(ctx, 'timed'),
+                ),
               ListTile(
                 leading: const Icon(Icons.close),
                 title: const Text('لغو'),
@@ -1022,6 +1037,29 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       if (choice == null || choice == 'cancel' || !mounted) return;
       if (choice == 'spoiler') sendSpoiler = true;
       if (choice == 'once') sendViewOnce = true;
+      if (choice == 'timed') {
+        sendViewOnce = true;
+        final ttl = await showModalBottomSheet<int>(
+          context: context,
+          builder: (ctx) => SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(width: 40, height: 4, margin: const EdgeInsets.only(top: 12, bottom: 8), decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(2))),
+                const Padding(padding: EdgeInsets.all(12), child: Text('مدت نمایش پس از باز کردن', style: TextStyle(fontWeight: FontWeight.bold))),
+                ListTile(leading: const Icon(Icons.timer_10), title: const Text('۱۰ ثانیه'), onTap: () => Navigator.pop(ctx, 10)),
+                ListTile(leading: const Icon(Icons.timer_3_outlined), title: const Text('۳۰ ثانیه'), onTap: () => Navigator.pop(ctx, 30)),
+                ListTile(leading: const Icon(Icons.timer_outlined), title: const Text('۱ دقیقه'), onTap: () => Navigator.pop(ctx, 60)),
+                ListTile(leading: const Icon(Icons.hourglass_bottom), title: const Text('۵ دقیقه'), onTap: () => Navigator.pop(ctx, 300)),
+                ListTile(leading: const Icon(Icons.schedule), title: const Text('۱ ساعت'), onTap: () => Navigator.pop(ctx, 3600)),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ),
+        );
+        if (ttl == null || !mounted) return;
+        sendViewOnceTtl = ttl;
+      }
     } else {
       if (!sendSpoiler) {
         final choice = await showModalBottomSheet<String>(
@@ -1069,6 +1107,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         'media_id': mediaId,
         'content': '',
         'is_view_once': sendViewOnce,
+        if (sendViewOnceTtl != null) 'view_once_ttl': sendViewOnceTtl,
         'is_spoiler': sendSpoiler,
         if (isVideo && videoMuted) 'is_muted': true,
       };
@@ -1081,6 +1120,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         'media_url': sendViewOnce ? null : '/api/v1/media/$mediaId',
         'message_type': mediaType,
         'is_view_once': sendViewOnce,
+        if (sendViewOnceTtl != null) 'view_once_ttl': sendViewOnceTtl,
         'is_spoiler': sendSpoiler,
         if (isVideo && videoMuted) 'is_muted': true,
       }, reply);
@@ -1603,6 +1643,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       if (!mounted) return;
       final route = MaterialPageRoute<void>(
         builder: (_) => ViewOncePhotoScreen(
+          ttlSeconds: message.viewOnceTtl,
           loadPhoto: () =>
               _api.getBytes('/messages/${message.id}/view-once/media'),
           consumePhoto: () async {
@@ -1895,6 +1936,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     } catch (_) {}
   }
 
+  Future<void> _createPoll() async {
+    if (_sending || !_can('send_messages')) return;
+    final created = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => PollCreateSheet(chatId: widget.chatId, api: _api),
+    );
+    if (created == true && mounted) {
+      await _pollNow();
+      _scrollToBottom();
+    }
+  }
+
   Future<void> _sendEncryptedText() async {
     if (_sending || !_can('send_messages')) return;
     final textCtrl = TextEditingController(text: _textCtrl.text.trim());
@@ -2071,6 +2125,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                       _sendLocation();
                     },
                   ),
+                  if (_chatType == 'group' || _chatType == 'channel' || _can('send_messages'))
+                    ListTile(
+                      leading: const Icon(Icons.poll_outlined, color: Colors.blue),
+                      title: const Text('نظرسنجی / پرسش چهارگزینه‌ای'),
+                      subtitle: const Text('ساخت نظرسنجی یا کوییز مانند تلگرام', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _createPoll();
+                      },
+                    ),
                   ListTile(
                     leading: const Icon(Icons.enhanced_encryption_outlined, color: Colors.amber),
                     title: const Text('پیام رمزدار'),
@@ -2267,11 +2331,36 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                   ).showSnackBar(const SnackBar(content: Text('فوروارد شد')));
                 }
               } catch (e) {
+                // Item10: if server wiped media but we have cached copy, re-upload and send
+                if (e is ApiException && [404, 410].contains(e.statusCode) && msg.mediaId != null) {
+                  try {
+                    final cached = MediaCacheService.getCachedFileForMessage(msg.id) ??
+                        (msg.mediaUrl != null ? MediaCacheService.getCachedFileForUrl(msg.mediaUrl!) : null);
+                    if (cached != null && await cached.exists()) {
+                      final upload = await _api.uploadFile('/media/upload', cached);
+                      final newMediaId = upload['id'] as String;
+                      await _api.post('/messages/', {
+                        'chat_id': c['id'],
+                        'message_type': msg.messageType,
+                        'media_id': newMediaId,
+                        'content': msg.content ?? '',
+                        'forwarded_from_id': msg.id,
+                      });
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('فوروارد از کش داخلی انجام شد')));
+                      }
+                      return;
+                    }
+                  } catch (cacheErr) {
+                    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('کش فوروارد خطا: $cacheErr')));
+                    return;
+                  }
+                }
                 if (mounted) {
-                  final msg = e is ApiException && e.statusCode == 403
+                  final errMsg = e is ApiException && e.statusCode == 403
                       ? 'فوروارد این پیام مجاز نیست (حریم خصوصی فرستنده یا مدیر)'
                       : e.toString();
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(errMsg)));
                 }
               }
             },
@@ -2659,6 +2748,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                               showSender: _chatType == 'group' || _chatType == 'channel',
                               mediaUrl: _mediaFullUrl(msg.mediaId, existingUrl: msg.mediaUrl),
                               token: _authToken,
+                              api: _api,
+                              onPollUpdated: () => _pollNow(),
                               onReactionTap: (emoji) => _toggleReaction(msg, emoji),
                               onAddReaction: () => _showReactionPicker(msg),
                             ),
