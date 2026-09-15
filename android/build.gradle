@@ -1,0 +1,41 @@
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.buildDir = "../build"
+
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+
+// Note: evaluationDependsOn can cause "already evaluated" with afterEvaluate.
+// Keep dependency but configure SDK safely.
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+def forceCompileSdk36 = { Project project ->
+    if (project.plugins.hasPlugin("com.android.library") ||
+        project.plugins.hasPlugin("com.android.application")) {
+        project.android {
+            compileSdk = 36
+        }
+    }
+}
+
+subprojects { subproject ->
+    if (subproject.state.executed) {
+        forceCompileSdk36(subproject)
+    } else {
+        subproject.afterEvaluate {
+            forceCompileSdk36(subproject)
+        }
+    }
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}
