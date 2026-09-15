@@ -4,6 +4,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'core/theme/app_theme.dart';
 import 'data/services/background_poll_service.dart';
+import 'data/services/connection_service.dart';
 import 'data/services/notification_service.dart';
 import 'presentation/providers/theme_provider.dart';
 import 'presentation/providers/locale_provider.dart';
@@ -77,6 +78,9 @@ class _SecureMessengerAppState extends ConsumerState<SecureMessengerApp> {
         if (!mounted) return;
         // Ask once per login: Android 13+ / iOS both need explicit consent.
         NotificationService().requestPermissions();
+        // Keep-alive service first (survives swipe-away), WorkManager stays
+        // as the backup for when the service is disabled.
+        ConnectionService.startIfEnabled();
         BackgroundPollService.start();
         if (!_launchHandled) {
           _launchHandled = true;

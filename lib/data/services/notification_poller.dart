@@ -1,77 +1,42 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:workmanager/workmanager.dart';
 
 import '../../core/constants/api_constants.dart';
 import 'notification_service.dart';
 
-/// WorkManager entry point. Must stay a top-level function and must not be
-/// renamed without updating [BackgroundPollService.init].
-@pragma('vm:entry-point')
-void notificationCallbackDispatcher() {
-  Workmanager().executeTask((task, inputData) async {
-    if (task == BackgroundPollService.taskName) {
-      await BackgroundPollService.runOnce();
-    }
-    return Future.value(true);
-  });
+/// What a background poll cycle concluded.
+enum PollOutcome {
+  /// At least one new banner was shown.
+  delivered,
+  /// Poll succeeded, nothing new to show.
+  noNew,
+  /// Tokens are dead (signed out / device terminated elsewhere): the caller
+  /// should stop polling instead of retrying forever.
+  signedOut,
+  /// Network/server failure: keep the schedule, the next tick retries.
+  failed,
 }
 
-/// Killed-app notifications without FCM (Item 3): a periodic WorkManager
-/// task polls `GET /notifications/pending` and raises the same local
-/// notifications the foreground poller shows.
+/// The single "check server, raise banners" routine shared by every
+/// notification path (foreground chat poller uses unread-diff instead, while
+/// the WorkManager task AND the foreground keep-alive service both call
+/// [pollAndNotify]). SharedPreferences-backed dedupe + cursor keep all paths
+/// from double-notifying.
 ///
-/// Honest limits (no push service can do better without FCM/APNs):
-/// * Android runs this at most every 15 minutes, deferred further by Doze.
-/// * OEM battery savers may delay it until the user exempts the app.
-/// * While the app is alive (even backgrounded), the 3-second foreground
-///   poller notifies instantly — this task is only the killed-app fallback.
-class BackgroundPollService {
-  static const taskName = 'secure_messenger_poll';
-  static const _taskId = 'secure_messenger_poll_periodic';
-
-  static Future<void> init() async {
-    try {
-      await Workmanager().initialize(
-        notificationCallbackDispatcher,
-        isInDebugMode: kDebugMode,
-      );
-    } catch (_) {
-      // Plugin missing on this platform (e.g. desktop): foreground
-      // notifications keep working; background polling is skipped.
-    }
-  }
-
-  /// (Re)registers the periodic poll. Called once after every login.
-  static Future<void> start() async {
-    try {
-      await Workmanager().registerPeriodicTask(
-        _taskId,
-        taskName,
-        frequency: const Duration(minutes: 15),
-      );
-    } catch (_) {}
-  }
-
-  static Future<void> stop() async {
-    try {
-      await Workmanager().cancelByUniqueName(_taskId);
-    } catch (_) {}
-  }
-
-  /// One poll cycle. Safe to call from the UI isolate too (used by tests
-  /// and by a manual "check now" if ever added).
-  static Future<void> runOnce() async {
+/// Deliberately dependency-free (http + prefs + local notifications only) so
+/// it runs identically in the UI isolate, the WorkManager isolate and the
+/// foreground-service isolate — no FCM, no Play Services, nothing sanctionable.
+class NotificationPoller {
+  static Future<PollOutcome> pollAndNotify() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      if (prefs.getBool('notif_enabled') == false) return;
+      if (prefs.getBool('notif_enabled') == false) return PollOutcome.noNew;
       var token = prefs.getString('access_token');
       final refreshToken = prefs.getString('refresh_token');
-      if (token == null || token.isEmpty) return;
+      if (token == null || token.isEmpty) return PollOutcome.signedOut;
 
       final notifications = NotificationService();
       await notifications.init();
@@ -120,13 +85,18 @@ class BackgroundPollService {
               res = await fetch(next);
             }
           } else {
-            return; // Signed out / device terminated elsewhere: stay silent.
+            // Signed out / device terminated elsewhere: stay silent and let
+            // the caller shut the schedule down.
+            return PollOutcome.signedOut;
           }
         } catch (_) {
-          return;
+          return PollOutcome.failed;
         }
       }
-      if (res.statusCode < 200 || res.statusCode >= 300) return;
+      if (res.statusCode == 401) return PollOutcome.signedOut;
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        return PollOutcome.failed;
+      }
 
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       final messages =
@@ -156,8 +126,10 @@ class BackgroundPollService {
       if (serverTime != null && serverTime.isNotEmpty) {
         await NotificationService.saveCursor(serverTime);
       }
+      return fresh.isNotEmpty ? PollOutcome.delivered : PollOutcome.noNew;
     } catch (_) {
-      // Never crash the worker: the next window retries automatically.
+      // Never crash the caller: the next tick retries automatically.
+      return PollOutcome.failed;
     }
   }
 }

@@ -27,6 +27,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+    <!-- Keep-alive background connection (Telegram-style): message polling
+         that survives swipe-away where WorkManager is force-stopped. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
     <!-- Location hardware is optional: the app stays installable on devices
@@ -60,5 +66,13 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- Warning: do not change the service name (flutter_foreground_task).
+             stopWithTask=false: swiping the app away must NOT stop message
+             delivery. remoteMessaging keeps Android 15 boot-start allowed. -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="dataSync|remoteMessaging"
+            android:stopWithTask="false"
+            android:exported="false" />
     </application>
 </manifest>

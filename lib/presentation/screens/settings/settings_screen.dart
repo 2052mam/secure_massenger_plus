@@ -5,6 +5,7 @@ import '../../../data/services/storage_service.dart';
 
 import '../../../data/services/api_service.dart';
 import '../../../data/services/background_poll_service.dart';
+import '../../../data/services/connection_service.dart';
 import '../../../data/services/notification_service.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/locale_provider.dart';
@@ -13,6 +14,7 @@ import '../chat/chat_screen.dart';
 import '../profile/profile_screen.dart';
 import 'account_switcher_screen.dart';
 import 'archive_lock_screen.dart';
+import 'background_connection_screen.dart';
 import 'device_management_screen.dart';
 import 'admin_reports_screen.dart';
 import 'sponsored_channels_screen.dart';
@@ -36,6 +38,19 @@ class SettingsScreen extends ConsumerWidget {
         child: ListView(
           children: [
             const _NotificationTile(),
+            ListTile(
+              leading: const Icon(Icons.sync_outlined),
+              title: const Text('اتصال پس‌زمینه'),
+              subtitle: const Text(
+                'دریافت پیام وقتی برنامه بسته است (مثل تلگرام)',
+                style: TextStyle(fontSize: 12),
+              ),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const BackgroundConnectionScreen(),
+                ),
+              ),
+            ),
             if (user != null)
               ListTile(
                 leading: CircleAvatar(
@@ -463,8 +478,10 @@ class _NotificationTileState extends State<_NotificationTile> {
     setState(() => _enabled = value);
     if (value) {
       await NotificationService().requestPermissions();
+      await ConnectionService.startIfEnabled();
       await BackgroundPollService.start();
     } else {
+      await ConnectionService.stop();
       await BackgroundPollService.stop();
     }
     await NotificationService().setEnabled(value);

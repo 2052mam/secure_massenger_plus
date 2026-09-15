@@ -1,7 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../providers/locale_provider.dart';
 import '../../providers/auth_provider.dart';
+import '../../../data/services/connection_service.dart';
 import '../../../data/services/presence_service.dart';
 import 'chat_list_screen.dart';
 import '../search/search_screen.dart';
@@ -32,6 +36,47 @@ class _MainShellState extends ConsumerState<MainShell> {
     _sessionUserId = session.userId;
     _presenceToken = session.token;
     _presence = PresenceService(session.api)..start();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _maybePromptBatteryExemption();
+    });
+  }
+
+  /// One-time nudge: without the battery exemption, Xiaomi/Huawei/Oppo cut
+  /// the keep-alive connection in sleep and killed-app notifications stop.
+  Future<void> _maybePromptBatteryExemption() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool('bg_exemption_prompted') == true) return;
+      await prefs.setBool('bg_exemption_prompted', true);
+      if (!mounted) return;
+      if (await ConnectionService.isBatteryExempt) return;
+      if (!mounted) return;
+      final allow = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('اعلان وقتی برنامه بسته است'),
+          content: const Text(
+            'برای اینکه پیام‌ها مثل تلگرام حتی با بسته بودن برنامه برسند، '
+            'اجازه بدهید SecureMessenger در پس‌زمینه فعال بماند. '
+            'در صفحه بعدی «Allow» را بزنید.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('بعداً'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('فعال‌سازی'),
+            ),
+          ],
+        ),
+      );
+      if (allow == true) {
+        await ConnectionService.requestBatteryExemption();
+      }
+    } catch (_) {}
   }
 
   @override

@@ -4,6 +4,7 @@ import '../../data/models/user_model.dart';
 import '../../data/services/account_service.dart';
 import '../../data/services/api_service.dart';
 import '../../data/services/background_poll_service.dart';
+import '../../data/services/connection_service.dart';
 import '../../data/services/notification_service.dart';
 import '../../data/services/storage_service.dart';
 
@@ -182,6 +183,9 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserModel?>> {
     // Signed out: no banners, no background polling for this account.
     try {
       await NotificationService().cancelAll();
+    } catch (_) {}
+    try {
+      await ConnectionService.stop();
     } catch (_) {}
     try {
       await BackgroundPollService.stop();

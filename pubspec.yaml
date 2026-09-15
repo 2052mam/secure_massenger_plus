@@ -61,6 +61,10 @@ dependencies:
   # by polling (foreground) and WorkManager (background/killed app).
   flutter_local_notifications: ^22.3.1
   workmanager: ^0.10.10
+  # Persistent background connection (Telegram-style keep-alive): a foreground
+  # service that survives swipe-away on Xiaomi/Huawei/Oppo where WorkManager
+  # jobs are force-stopped with the app.
+  flutter_foreground_task: ^11.0.3
 
   # Utils
   url_launcher: ^6.3.1
