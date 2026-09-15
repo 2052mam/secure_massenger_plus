@@ -2,12 +2,15 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../../../data/services/api_service.dart';
 import '../../../data/services/connection_service.dart';
+import '../../../data/services/push_service.dart';
 import '../../../data/services/system_settings_service.dart';
 
 /// Telegram-style background-connection settings: the keep-alive service
-/// plus the two system exemptions (battery + autostart) that decide whether
-/// notifications arrive after the app is swiped away — no FCM involved.
+/// plus the system exemptions (battery + hibernation + autostart) that
+/// decide whether notifications arrive after the app is swiped away, with
+/// an optional FCM instant-push row on top.
 class BackgroundConnectionScreen extends StatefulWidget {
   const BackgroundConnectionScreen({super.key});
 
@@ -24,6 +27,7 @@ class _BackgroundConnectionScreenState
   bool _hibernationExempt = false;
   bool _loaded = false;
   bool _busy = false;
+  bool _testing = false;
 
   @override
   void initState() {
@@ -80,6 +84,44 @@ class _BackgroundConnectionScreenState
         ),
       );
       await _refresh();
+    }
+  }
+
+  /// Fires a self-test FCM tick via the server. Success proves the whole
+  /// push chain (server credentials -> FCM -> this phone) in seconds.
+  Future<void> _testPush() async {
+    if (_testing) return;
+    setState(() => _testing = true);
+    try {
+      final res = await ApiService().post('/notifications/test', {});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'اعلان آزمایشی ارسال شد (${res['delivered'] ?? 0} دستگاه) — باید ظرف چند ثانیه برسد.',
+          ),
+        ),
+      );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            e.statusCode == 404
+                ? 'سرویس پوش روی سرور پیکربندی نشده — اعلان‌ها از طریق اتصال پس‌زمینه می‌رسند.'
+                : 'ارسال ناموفق بود: ${e.message}',
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('ارسال ناموفق بود. اتصال اینترنت را بررسی کنید.'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _testing = false);
     }
   }
 
@@ -242,11 +284,38 @@ class _BackgroundConnectionScreenState
                       child: const Text('باز کردن'),
                     ),
                   ),
+                  ListTile(
+                    leading: Icon(
+                      Icons.bolt_outlined,
+                      color: PushService.isSupported
+                          ? Colors.green
+                          : Colors.grey,
+                    ),
+                    title: const Text('اعلان فوری (پوش)'),
+                    subtitle: Text(
+                      PushService.isSupported
+                          ? 'فعال است — بیدارسازی فوری حتی در خواب عمیق گوشی.'
+                          : 'در این نصب فعال نیست — اتصال پس‌زمینه جایگزین آن است.',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    trailing: _testing
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : FilledButton.tonal(
+                            onPressed: PushService.isSupported
+                                ? _testPush
+                                : null,
+                            child: const Text('تست'),
+                          ),
+                  ),
                   const Divider(),
                   const Padding(
                     padding: EdgeInsets.all(8),
                     child: Text(
-                      'نکته باتری: این اتصال هر ~۲۰ ثانیه یک بررسی سبک انجام می‌دهد؛ مصرف آن در حد نگه‌داشتن اتصال تلگرام است. بدون هیچ سرور پوش (گوگل/اپل) کار می‌کند، پس تحریم و فیلترینگ اثری روی آن ندارد.',
+                      'نکته باتری: این اتصال هر ~۲۰ ثانیه یک بررسی سبک انجام می‌دهد؛ مصرف آن در حد نگه‌داشتن اتصال تلگرام است. اعلان فوری (پوش) در صورت فعال بودن، بیدارسازی را سریع‌تر می‌کند؛ بدون آن هم اتصال بالا به‌تنهایی کار می‌کند، پس تحریم و فیلترینگ اثری روی آن ندارد.',
                       style: TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                   ),

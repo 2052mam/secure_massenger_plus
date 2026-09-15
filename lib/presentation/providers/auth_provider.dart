@@ -6,6 +6,7 @@ import '../../data/services/api_service.dart';
 import '../../data/services/background_poll_service.dart';
 import '../../data/services/connection_service.dart';
 import '../../data/services/notification_service.dart';
+import '../../data/services/push_service.dart';
 import '../../data/services/storage_service.dart';
 
 final authNotifierProvider =
@@ -202,6 +203,11 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserModel?>> {
         await ApiService.withToken(token).post('/auth/logout', {});
       } catch (_) {}
     }
+    // Stop FCM ticks to this device (runs while the stored token is still
+    // valid; clears the server-side token and rotates the local FCM token).
+    try {
+      await PushService.unregisterToken();
+    } catch (_) {}
     if (!_isCurrent(generation)) return;
     if (!keepAccounts && userId != null) await AccountService.remove(userId);
     await _clearSession(generation);
@@ -224,6 +230,11 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserModel?>> {
         await AccountService.remove(userId);
       } catch (_) {}
     }
+    // Rotate the FCM token too (the POST 401s harmlessly; the server already
+    // cleared the token when terminating the device).
+    try {
+      await PushService.unregisterToken();
+    } catch (_) {}
     await _clearSession(generation);
   }
 }

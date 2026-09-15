@@ -100,6 +100,9 @@ def terminate_device(device_id):
     device.deleted_at = datetime.utcnow()
     device.deleted_by = user_id
     device.is_active = False
+    # Stop push ticks to the removed phone immediately.
+    device.push_token = None
+    device.push_platform = None
     # deactivate sessions
     UserSession.query.filter_by(
         device_id=device.id, is_active=True,
@@ -143,6 +146,8 @@ def terminate_others():
         d.deleted_at = datetime.utcnow()
         d.deleted_by = user_id
         d.is_active = False
+        d.push_token = None
+        d.push_platform = None
         UserSession.query.filter_by(
             device_id=d.id, is_active=True,
         ).update({'is_active': False}, synchronize_session=False)
@@ -191,6 +196,17 @@ def terminate_session(session_id):
     if not session:
         return jsonify({'error': 'نشست یافت نشد'}), 404
     session.is_active = False
+    # If this was the device's last live session, its token must not buzz.
+    remaining = UserSession.query.filter_by(
+        device_id=session.device_id, user_id=user_id, is_active=True,
+    ).count()
+    if remaining == 0 and session.device_id:
+        device = UserDevice.query.filter_by(
+            id=session.device_id, user_id=user_id,
+        ).first()
+        if device:
+            device.push_token = None
+            device.push_platform = None
     db.session.add(AuditLog(
         actor_id=user_id, action='terminate_session',
         entity_type='session', entity_id=session_id,

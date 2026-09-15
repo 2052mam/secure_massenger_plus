@@ -4,6 +4,13 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
+// Firebase Cloud Messaging: applied ONLY when google-services.json has been
+// placed in this folder (see FCM_SETUP.md). Until then the build — and the
+// app, in polling-only mode — works exactly as before.
+if (file("google-services.json").exists()) {
+    apply plugin: "com.google.gms.google-services"
+}
+
 android {
     namespace = "com.securemessenger.app"
     compileSdk = 36

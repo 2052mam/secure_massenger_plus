@@ -6,6 +6,7 @@ import 'core/theme/app_theme.dart';
 import 'data/services/background_poll_service.dart';
 import 'data/services/connection_service.dart';
 import 'data/services/notification_service.dart';
+import 'data/services/push_service.dart';
 import 'data/services/system_settings_service.dart';
 import 'presentation/providers/theme_provider.dart';
 import 'presentation/providers/locale_provider.dart';
@@ -79,8 +80,9 @@ class _SecureMessengerAppState extends ConsumerState<SecureMessengerApp> {
         if (!mounted) return;
         // Ask once per login: Android 13+ / iOS both need explicit consent.
         NotificationService().requestPermissions();
-        // Keep-alive service first (survives swipe-away), WorkManager stays
-        // as the backup for when the service is disabled.
+        // FCM token sync first (external wake-up when configured), then the
+        // keep-alive service (survives swipe-away) and WorkManager backup.
+        PushService.syncToken();
         ConnectionService.startIfEnabled();
         BackgroundPollService.start();
         // Silently opt out of "Pause app activity if unused" when the ROM

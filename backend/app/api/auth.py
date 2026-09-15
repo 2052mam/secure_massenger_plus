@@ -779,6 +779,11 @@ def logout():
         ).first()
         if device:
             device.last_active = datetime.utcnow()
+            # A logged-out phone must stop buzzing. The client also clears
+            # the token via /notifications/register; this covers clients
+            # that never get the chance (network drop mid-logout).
+            device.push_token = None
+            device.push_platform = None
     user = db.session.get(User, user_id)
     if user:
         user.is_online = False

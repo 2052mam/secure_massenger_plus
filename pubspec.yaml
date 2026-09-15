@@ -65,6 +65,11 @@ dependencies:
   # service that survives swipe-away on Xiaomi/Huawei/Oppo where WorkManager
   # jobs are force-stopped with the app.
   flutter_foreground_task: ^11.0.3
+  # Firebase Cloud Messaging: instant external wake-up ticks (data-only).
+  # Fully optional at runtime — without google-services.json the app runs
+  # on local polling. See FCM_SETUP.md.
+  firebase_core: ^4.15.0
+  firebase_messaging: ^16.7.0
 
   # Utils
   url_launcher: ^6.3.1

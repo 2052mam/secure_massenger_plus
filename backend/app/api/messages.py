@@ -58,6 +58,7 @@ def dispatch_scheduled_messages(chat_id=None):
     ).limit(100).all()
     if not scheduled_msgs:
         return
+    flipped = []
     for msg in scheduled_msgs:
         # Claim the message first: a concurrent poll gets 0 rows and skips it.
         claimed = Message.query.filter_by(
@@ -69,6 +70,7 @@ def dispatch_scheduled_messages(chat_id=None):
         }, synchronize_session=False)
         if claimed != 1:
             continue
+        flipped.append((msg.chat_id, msg.sender_id))
         # The UPDATE above bypasses the ORM instance; keep it in sync.
         msg.is_scheduled = False
         msg.scheduled_at = None
@@ -106,6 +108,9 @@ def dispatch_scheduled_messages(chat_id=None):
         # the flush. Roll back and let the next poll finish the dispatch;
         # claimed messages stay claimed only when their commit succeeded.
         db.session.rollback()
+        # The rollback undid the flips above: only the fallback commits
+        # below actually land, so re-collect from scratch.
+        flipped = []
         # Fall back to one-by-one commits so a single duplicate can never
         # poison the whole batch again.
         for msg in scheduled_msgs:
@@ -115,10 +120,12 @@ def dispatch_scheduled_messages(chat_id=None):
                 ).first()
                 if pending is None or pending.is_deleted_for_all:
                     continue
+                did_flip = False
                 if pending.is_scheduled and pending.scheduled_at and pending.scheduled_at <= datetime.utcnow():
                     pending.is_scheduled = False
                     pending.scheduled_at = None
                     pending.created_at = datetime.utcnow()
+                    did_flip = True
                 existing = {
                     row.user_id for row in MessageStatus.query.filter_by(
                         message_id=pending.id,
@@ -143,9 +150,23 @@ def dispatch_scheduled_messages(chat_id=None):
                 if chat:
                     chat.updated_at = datetime.utcnow()
                 db.session.commit()
+                if did_flip:
+                    flipped.append((pending.chat_id, pending.sender_id))
             except IntegrityError:
                 db.session.rollback()
                 continue
+
+    # Wake recipients for each chat that received dispatched messages. One
+    # tick per (chat, sender) pair: FCM collapses repeats, and every tick
+    # funnels into GET /notifications/pending so bursts are harmless.
+    if flipped:
+        try:
+            from app.services.push_service import notify_new_message
+            app_obj = current_app._get_current_object()
+            for fired_chat_id, fired_sender_id in set(flipped):
+                notify_new_message(app_obj, fired_chat_id, fired_sender_id)
+        except Exception:
+            pass
 
 
 def _pinned_count(chat_id):
@@ -492,6 +513,16 @@ def send_message():
     ))
     db.session.commit()
 
+    # Scheduled messages tick when they dispatch, not when they are queued.
+    if not is_scheduled:
+        try:
+            from app.services.push_service import notify_new_message
+            notify_new_message(
+                current_app._get_current_object(), chat_id, user_id,
+            )
+        except Exception:
+            pass
+
     return jsonify(serialize_messages([msg], user_id, status_override='sent')[0]), 201
 
 
@@ -642,6 +673,14 @@ def forward_message(message_id):
 
     Chat.query.filter_by(id=target_chat_id).update({'updated_at': datetime.utcnow()})
     db.session.commit()
+
+    try:
+        from app.services.push_service import notify_new_message
+        notify_new_message(
+            current_app._get_current_object(), target_chat_id, user_id,
+        )
+    except Exception:
+        pass
 
     return jsonify({'id': new_msg.id, 'chat_id': target_chat_id}), 201
 

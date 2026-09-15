@@ -12,10 +12,13 @@ still delivers messages. This blueprint is the server half of that idea:
   firewall hole is required.
 * ``POST /register`` stores an optional future push token and the user's
   notification preference on the current device row.
+* Optional FCM layer (``app.services.push_service``): when the server has
+  Firebase credentials, new messages also emit a data-only wake-up tick.
+  ``POST /test`` fires a self-test tick for the settings screen.
 """
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from app import db
@@ -214,12 +217,37 @@ def register():
     if device is None:
         return jsonify({'error': 'دستگاهی یافت نشد'}), 404
     device.notifications_enabled = enabled
-    if push_token:
-        device.push_token = push_token
-        device.push_platform = platform or 'android'
+    # An explicit empty/null token clears the stored one (logout path), so
+    # a signed-out phone stops buzzing. Omitting the key leaves it alone.
+    if 'push_token' in data:
+        if push_token:
+            device.push_token = push_token
+            device.push_platform = platform or 'android'
+        else:
+            device.push_token = None
+            device.push_platform = None
     device.last_active = datetime.utcnow()
     db.session.commit()
     return jsonify({'ok': True, 'notifications_enabled': enabled}), 200
+
+
+@notifications_bp.route('/test', methods=['POST'])
+@jwt_required()
+def test():
+    """Fire a self-test FCM tick at the caller's own devices.
+
+    Powers the "send test notification" button in the app's connection
+    settings. 404 when the server has no FCM credentials so the app can
+    explain that push is not configured instead of failing silently.
+    """
+    from app.services.push_service import notify_test, push_configured
+    if not push_configured():
+        return jsonify({
+            'ok': False, 'error': 'push_not_configured',
+        }), 404
+    user_id = get_jwt_identity()
+    delivered = notify_test(current_app._get_current_object(), user_id)
+    return jsonify({'ok': True, 'delivered': delivered}), 200
 
 
 @notifications_bp.route('/unread', methods=['GET'])

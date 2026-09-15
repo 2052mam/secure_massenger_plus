@@ -1,0 +1,52 @@
+# Misc
+.DS_Store
+*.log
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+.idea/
+*.iml
+
+# Android
+android/.gradle/
+android/app/build/
+android/build/
+local.properties
+
+# Firebase client config (per-developer; the build works without it in
+# polling-only mode). See FCM_SETUP.md.
+google-services.json
+**/google-services.json
+GoogleService-Info.plist
+**/GoogleService-Info.plist
+
+# Firebase Admin / FCM service-account keys — NEVER commit these.
+*-firebase-adminsdk-*.json
+**/*-firebase-adminsdk-*.json
+service-account*.json
+**/service-account*.json
+fcm-service-account*.json
+**/fcm-service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.sqlite
+*.sqlite-journal
+
+# Local env / uploads (the committed backend/.env is legacy; new secrets go
+# in an untracked .env next to it, never in git).
+.env
+.env.local
+backend/.env
+backend/uploads/*
+!backend/uploads/.gitkeep
+uploads/*
+!uploads/.gitkeep

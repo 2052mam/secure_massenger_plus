@@ -166,6 +166,37 @@ class NotificationService {
     } catch (_) {}
   }
 
+  /// End-to-end self-test banner (FCM "test" tick or manual check). Uses a
+  /// reserved id and no payload, so tapping it safely does nothing.
+  Future<void> showTest() async {
+    if (!await isEnabled()) return;
+    await init();
+    final androidDetails = AndroidNotificationDetails(
+      _channelId,
+      _channelName,
+      channelDescription: _channelDesc,
+      importance: Importance.high,
+      priority: Priority.high,
+      ticker: 'تست اعلان',
+    );
+    const darwinDetails = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    );
+    try {
+      await _plugin.show(
+        id: 770001,
+        title: 'SecureMessenger',
+        body: '✅ اعلان آزمایشی رسید — اتصال پیام‌رسانی سالم است.',
+        notificationDetails: NotificationDetails(
+          android: androidDetails,
+          iOS: darwinDetails,
+        ),
+      );
+    } catch (_) {}
+  }
+
   Future<void> cancelAll() async {
     try {
       await _plugin.cancelAll();
