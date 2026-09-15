@@ -7,6 +7,8 @@ import '../../providers/locale_provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../../data/services/connection_service.dart';
 import '../../../data/services/presence_service.dart';
+import '../../../data/services/system_settings_service.dart';
+import '../../widgets/home/notification_setup_dialog.dart';
 import 'chat_list_screen.dart';
 import '../search/search_screen.dart';
 import '../settings/settings_screen.dart';
@@ -41,41 +43,22 @@ class _MainShellState extends ConsumerState<MainShell> {
     });
   }
 
-  /// One-time nudge: without the battery exemption, Xiaomi/Huawei/Oppo cut
-  /// the keep-alive connection in sleep and killed-app notifications stop.
+  /// One-time setup checklist: battery exemption + hibernation exemption are
+  /// both required for killed-app delivery (either one missing breaks it on
+  /// Xiaomi/Huawei/Oppo). Shown once, only when something is still missing.
   Future<void> _maybePromptBatteryExemption() async {
     if (!Platform.isAndroid) return;
     try {
       final prefs = await SharedPreferences.getInstance();
-      if (prefs.getBool('bg_exemption_prompted') == true) return;
-      await prefs.setBool('bg_exemption_prompted', true);
+      if (prefs.getBool('bg_setup_prompted_v2') == true) return;
+      await prefs.setBool('bg_setup_prompted_v2', true);
       if (!mounted) return;
-      if (await ConnectionService.isBatteryExempt) return;
+      final batteryOk = await ConnectionService.isBatteryExempt;
+      final hibernationOk =
+          await SystemSettingsService.isHibernationExempt();
       if (!mounted) return;
-      final allow = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('اعلان وقتی برنامه بسته است'),
-          content: const Text(
-            'برای اینکه پیام‌ها مثل تلگرام حتی با بسته بودن برنامه برسند، '
-            'اجازه بدهید SecureMessenger در پس‌زمینه فعال بماند. '
-            'در صفحه بعدی «Allow» را بزنید.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('بعداً'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('فعال‌سازی'),
-            ),
-          ],
-        ),
-      );
-      if (allow == true) {
-        await ConnectionService.requestBatteryExemption();
-      }
+      if (batteryOk && hibernationOk) return;
+      await showNotificationSetupDialog(context);
     } catch (_) {}
   }
 

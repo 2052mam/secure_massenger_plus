@@ -3,6 +3,7 @@ package com.securemessenger.app
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
@@ -27,10 +28,12 @@ class MainActivity : FlutterActivity() {
             }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "secure_messenger/system")
             .setMethodCallHandler { call, result ->
-                if (call.method == "openAutoStartSettings") {
-                    result.success(openAutoStartSettings())
-                } else {
-                    result.notImplemented()
+                when (call.method) {
+                    "openAutoStartSettings" -> result.success(openAutoStartSettings())
+                    "openAppInfo" -> result.success(openAppInfo())
+                    "isHibernationExempt" -> result.success(isHibernationExempt())
+                    "setHibernationExempt" -> result.success(setHibernationExempt())
+                    else -> result.notImplemented()
                 }
             }
     }
@@ -129,6 +132,12 @@ class MainActivity : FlutterActivity() {
             } catch (_: Exception) {
             }
         }
+        // Fall back to the app-details page (hosts the autostart-adjacent toggles
+        // on ROMs without a dedicated manager).
+        return openAppInfo()
+    }
+
+    private fun openAppInfo(): Boolean {
         return try {
             startActivity(
                 Intent(
@@ -140,5 +149,35 @@ class MainActivity : FlutterActivity() {
         } catch (_: Exception) {
             false
         }
+    }
+
+    /**
+     * True when Android's "Pause app activity if unused" is OFF for us, i.e.
+     * the system may not hibernate the app (which would freeze the keep-alive
+     * service and cancel background work). Below Android 11 the feature does
+     * not exist, so there is nothing to exempt.
+     */
+    private fun isHibernationExempt(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return true
+        return try {
+            packageManager.isAutoRevokeWhitelisted(packageName)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Best-effort self-exemption from app hibernation. Returns the resulting
+     * state: some ROMs refuse programmatic changes (SecurityException) and
+     * the user must flip the toggle in App Info manually.
+     */
+    private fun setHibernationExempt(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return true
+        try {
+            packageManager.setAutoRevokeWhitelisted(packageName, true)
+        } catch (_: Exception) {
+            // Refused: the UI falls back to guiding the user to App Info.
+        }
+        return isHibernationExempt()
     }
 }

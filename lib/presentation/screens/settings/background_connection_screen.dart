@@ -21,6 +21,7 @@ class _BackgroundConnectionScreenState
   bool _enabled = true;
   bool _running = false;
   bool _batteryExempt = false;
+  bool _hibernationExempt = false;
   bool _loaded = false;
   bool _busy = false;
 
@@ -34,11 +35,13 @@ class _BackgroundConnectionScreenState
     final enabled = await ConnectionService.isEnabled();
     final running = await ConnectionService.isRunning;
     final exempt = await ConnectionService.isBatteryExempt;
+    final hibernation = await SystemSettingsService.isHibernationExempt();
     if (!mounted) return;
     setState(() {
       _enabled = enabled;
       _running = running;
       _batteryExempt = exempt;
+      _hibernationExempt = hibernation;
       _loaded = true;
     });
   }
@@ -60,6 +63,26 @@ class _BackgroundConnectionScreenState
     await _refresh();
   }
 
+  Future<void> _fixHibernation() async {
+    final ok = await SystemSettingsService.setHibernationExempt();
+    await _refresh();
+    if (!mounted) return;
+    if (!ok) {
+      // The ROM refused the programmatic fix: open App Info where the
+      // "Pause app activity if unused" toggle lives.
+      await SystemSettingsService.openAppInfo();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'گزینه «توقف فعالیت برنامه در صورت عدم استفاده» را خاموش کنید، بعد برگردید.',
+          ),
+        ),
+      );
+      await _refresh();
+    }
+  }
+
   Future<void> _openAutoStart() async {
     final opened = await SystemSettingsService.openAutoStartSettings();
     if (!mounted) return;
@@ -76,7 +99,8 @@ class _BackgroundConnectionScreenState
 
   @override
   Widget build(BuildContext context) {
-    final healthy = _enabled && _running && _batteryExempt;
+    final healthy =
+        _enabled && _running && _batteryExempt && _hibernationExempt;
     return Scaffold(
       appBar: AppBar(title: const Text('اتصال پس‌زمینه')),
       body: !_loaded
@@ -180,6 +204,29 @@ class _BackgroundConnectionScreenState
                         : FilledButton.tonal(
                             onPressed: _fixBattery,
                             child: const Text('فعال‌سازی'),
+                          ),
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      _hibernationExempt
+                          ? Icons.pause_circle_outline
+                          : Icons.play_circle_outline,
+                      color:
+                          _hibernationExempt ? Colors.green : Colors.orange,
+                    ),
+                    title: const Text('عدم توقف خودکار برنامه'),
+                    subtitle: Text(
+                      _hibernationExempt
+                          ? 'فعال است — «توقف فعالیت در صورت عدم استفاده» خاموش است.'
+                          : 'لازم است — اگر روشن بماند، اندروید اتصال را بعد از بستن برنامه می‌بندد.',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    trailing: _hibernationExempt
+                        ? const Icon(Icons.check,
+                            color: Colors.green, size: 20)
+                        : FilledButton.tonal(
+                            onPressed: _fixHibernation,
+                            child: const Text('رفع'),
                           ),
                   ),
                   ListTile(

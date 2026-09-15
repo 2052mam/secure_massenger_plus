@@ -6,6 +6,7 @@ import 'core/theme/app_theme.dart';
 import 'data/services/background_poll_service.dart';
 import 'data/services/connection_service.dart';
 import 'data/services/notification_service.dart';
+import 'data/services/system_settings_service.dart';
 import 'presentation/providers/theme_provider.dart';
 import 'presentation/providers/locale_provider.dart';
 import 'presentation/providers/auth_provider.dart';
@@ -82,6 +83,10 @@ class _SecureMessengerAppState extends ConsumerState<SecureMessengerApp> {
         // as the backup for when the service is disabled.
         ConnectionService.startIfEnabled();
         BackgroundPollService.start();
+        // Silently opt out of "Pause app activity if unused" when the ROM
+        // allows it: hibernation would freeze the service after swipe-away.
+        // When refused, the setup dialog guides the user to flip it manually.
+        SystemSettingsService.setHibernationExempt();
         if (!_launchHandled) {
           _launchHandled = true;
           // A tap that launched the app from killed state: open that chat.
