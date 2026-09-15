@@ -56,7 +56,7 @@ class NotificationService {
     );
     const settings = InitializationSettings(android: android, iOS: darwin);
     await _plugin.initialize(
-      settings,
+      settings: settings,
       onDidReceiveNotificationResponse: _onTap,
     );
     _initialized = true;
@@ -151,10 +151,10 @@ class NotificationService {
     final displayTitle = count > 1 ? '$title ($count پیام جدید)' : title;
     try {
       await _plugin.show(
-        _stableId(chatId),
-        displayTitle,
-        body,
-        details,
+        id: _stableId(chatId),
+        title: displayTitle,
+        body: body,
+        notificationDetails: details,
         payload: '$chatId|$title|$chatType',
       );
     } catch (_) {}
@@ -162,7 +162,7 @@ class NotificationService {
 
   Future<void> cancelForChat(String chatId) async {
     try {
-      await _plugin.cancel(_stableId(chatId));
+      await _plugin.cancel(id: _stableId(chatId));
     } catch (_) {}
   }
 
